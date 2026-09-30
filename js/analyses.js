@@ -169,6 +169,31 @@
     },
   });
 
+  // ------------------------------------------------------------ ベイズファクターの共通部品
+  // 事前分布の幅（prior）は分析ごとに JASP と同じ既定値を使う
+  const bayesOptions = (priorLabel, def) => [
+    { type: 'heading', label: 'ベイズファクター' },
+    { type: 'check', key: 'bf', label: 'ベイズファクターを表示', def: false },
+    { type: 'radio', key: 'bfType', options: [['bf10', 'BF₁₀（H₁ ÷ H₀）'], ['bf01', 'BF₀₁（H₀ ÷ H₁）'], ['log', 'log(BF₁₀)']], def: 'bf10' },
+    ...(priorLabel ? [{ type: 'number', key: 'bfPrior', label: priorLabel, def, min: 0.01, step: 0.001 }] : []),
+  ];
+  const priorOf = (o, def) => (Number(o.bfPrior) > 0 ? Number(o.bfPrior) : def);
+  const SUB = { two: '₁', greater: '₊', less: '₋' };
+  // 見出し：両側は BF₁₀、片側は BF₊₀ / BF₋₀
+  const bfLabel = (o, alt) => { const h = SUB[alt || 'two']; return o.bfType === 'bf01' ? `BF₀${h}` : o.bfType === 'log' ? `log(BF${h}₀)` : `BF${h}₀`; };
+  const bfShow = (bf10, o) => (!isFinite(bf10) && !(bf10 === Infinity) ? NaN : o.bfType === 'bf01' ? 1 / bf10 : o.bfType === 'log' ? Math.log(bf10) : bf10);
+  // 証拠の強さ（Lee & Wagenmakers, 2013 の目安）
+  function bfEvidence(bf10) {
+    if (!(bf10 > 0) || !isFinite(bf10) && bf10 !== Infinity) return '';
+    const b = bf10 >= 1 ? bf10 : 1 / bf10, h = bf10 >= 1 ? 'H₁' : 'H₀';
+    return `${h} を${b < 3 ? 'わずかに' : b < 10 ? '中程度に' : b < 30 ? '強く' : b < 100 ? '非常に強く' : '極めて強く'}支持`;
+  }
+  const bfCols = (o, alt) => [{ key: 'bf', label: bfLabel(o, alt) }, { key: 'ev', label: '証拠の強さ', fmt: 'text' }];
+  const bfCells = (bf10, o) => ({ bf: bfShow(bf10, o), ev: bfEvidence(bf10) });
+  const bfNote = (o, prior) => `ベイズファクター BF₁₀ は、データが H₀（効果なし）より H₁（効果あり）のもとで何倍起こりやすいかを示します`
+    + `${o.bfType === 'bf01' ? '（BF₀₁ = 1 ÷ BF₁₀）' : o.bfType === 'log' ? '（表は自然対数）' : ''}。`
+    + `証拠の強さの目安は Lee & Wagenmakers (2013)：1–3 わずか、3–10 中程度、10–30 強い、30–100 非常に強い、100 超 極めて強い。事前分布：${prior}。`;
+
   // ------------------------------------------------------------ t 検定の共通オプション
   const tOptions = (extra) => [
     { type: 'heading', label: '検定' },
@@ -183,6 +208,7 @@
     { type: 'check', key: 'effect', label: '効果量', def: true },
     { type: 'number', key: 'ciLevel', label: '信頼水準 %', def: 95, min: 50, max: 99.9, step: 0.1 },
     { type: 'check', key: 'desc', label: '記述統計', def: false },
+    ...bayesOptions('事前分布の幅（Cauchy の r）', 0.707),
     { type: 'heading', label: '前提の確認' },
     { type: 'check', key: 'normality', label: '正規性（Shapiro-Wilk）', def: false },
     ...(extra.welch ? [{ type: 'check', key: 'levene', label: '等分散性（Levene）', def: false }] : []),
@@ -197,9 +223,13 @@
     if (o.diff) c.push({ key: 'md', label: '平均値の差' }, { key: 'sed', label: '差の SE' },
       { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) });
     if (o.effect) c.push({ key: 'es', label: '効果量' }, { key: 'esType', label: '', fmt: 'text' });
+    if (o.bf && o.student) c.push(...bfCols(o, o.alt));
     void hasDF;
     return c;
   };
+  // t 検定のベイズファクター（Student の行だけ。N は有効サンプルサイズ）
+  const tBF = (o, t, N, nu) => (o.bf ? bfCells(S.bfT(t, N, nu, priorOf(o, 0.707), o.alt), o) : {});
+  const tBFNote = o => (o.bf && o.student ? bfNote(o, `効果量 δ に Cauchy 分布（幅 r = ${priorOf(o, 0.707)}）${o.alt !== 'two' ? '、片側は δ の符号で切断' : ''}。Student の t 検定の行にだけ示します`) : null);
 
   // ------------------------------------------------------------ 1サンプルの t 検定
   A.push({
@@ -218,7 +248,7 @@
         if (o.student) {
           anyTest = true;
           const t = (m - mu) / se, [lo, hi] = tCI(m - mu, se, n - 1, o.alt, lv);
-          rows.push({ var: name, test: 'Student', stat: t, df: n - 1, p: tP(t, n - 1, o.alt), md: m - mu, sed: se, lo, hi, es: (m - mu) / sd, esType: 'Cohen の d' });
+          rows.push({ var: name, test: 'Student', stat: t, df: n - 1, p: tP(t, n - 1, o.alt), md: m - mu, sed: se, lo, hi, es: (m - mu) / sd, esType: 'Cohen の d', ...tBF(o, t, n, n - 1) });
         }
         if (o.nonpar) {
           anyTest = true;
@@ -231,7 +261,7 @@
       if (anyTest) out.push(table('1サンプルの t 検定', tCols(o), rows, clean([
         `検定値は ${mu} です。`, altNote(o, '平均', mu),
         o.nonpar ? 'Wilcoxon の統計量 V は正の順位の和です。' + (rows.some(r => r._method === 'normal') ? '同順位・ゼロを含むか n ≥ 50 のため、連続性補正つきの正規近似で p を求めています。' : '') : null,
-        o.diff && o.nonpar ? 'Wilcoxon の行の「平均値の差」は中央値と検定値の差です。' : null])));
+        o.diff && o.nonpar ? 'Wilcoxon の行の「平均値の差」は中央値と検定値の差です。' : null, tBFNote(o)])));
       if (o.desc) out.push(table('記述統計', [{ key: 'var', label: '', fmt: 'text' }, { key: 'n', label: 'N', fmt: 'int' }, { key: 'mean', label: '平均値' },
         { key: 'sd', label: '標準偏差' }, { key: 'se', label: '標準誤差' }, { key: 'median', label: '中央値' }, { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) }], desc));
       if (o.normality) out.push(table('正規性の検定（Shapiro-Wilk）', [{ key: 'var', label: '', fmt: 'text' }, { key: 'W', label: 'W' }, { key: 'p', label: 'p', fmt: 'p' }], norm, ['p が小さいと正規分布から外れていることを示します。']));
@@ -270,7 +300,7 @@
           anyTest = true;
           const df = n1 + n2 - 2, sp = Math.sqrt(((n1 - 1) * v1 + (n2 - 1) * v2) / df), se = sp * Math.sqrt(1 / n1 + 1 / n2), t = md / se;
           const [lo, hi] = tCI(md, se, df, o.alt, lv);
-          rows.push({ var: name, test: 'Student', stat: t, df, p: tP(t, df, o.alt), md, sed: se, lo, hi, es: md / sp, esType: 'Cohen の d' });
+          rows.push({ var: name, test: 'Student', stat: t, df, p: tP(t, df, o.alt), md, sed: se, lo, hi, es: md / sp, esType: 'Cohen の d', ...tBF(o, t, n1 * n2 / (n1 + n2), df) });
         }
         if (o.welch) {
           anyTest = true;
@@ -298,7 +328,7 @@
         `群1 = ${g1}、群2 = ${g2}。平均値の差は 群1 − 群2 です。`, altNote(o, '群1', '群2'),
         o.welch && o.effect ? 'Welch の d は2群の分散の平均を分母にしています。' : null,
         o.nonpar ? 'Mann-Whitney の統計量 W は群1の U です。' + (rows.some(r => r._method === 'normal') ? '同順位があるか n ≥ 50 のため、連続性補正つきの正規近似で p を求めています。' : '') : null,
-        o.diff && o.nonpar ? 'Mann-Whitney の行の「平均値の差」は中央値の差です。' : null])));
+        o.diff && o.nonpar ? 'Mann-Whitney の行の「平均値の差」は中央値の差です。' : null, tBFNote(o)])));
       if (o.desc) out.push(table('群ごとの記述統計', [{ key: 'var', label: '', fmt: 'text' }, { key: 'grp', label: '群', fmt: 'text' }, { key: 'n', label: 'N', fmt: 'int' },
         { key: 'mean', label: '平均値' }, { key: 'sd', label: '標準偏差' }, { key: 'se', label: '標準誤差' }, { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) }], desc));
       if (o.normality) out.push(table('正規性の検定（Shapiro-Wilk）', [{ key: 'var', label: '', fmt: 'text' }, { key: 'grp', label: '群', fmt: 'text' }, { key: 'W', label: 'W' }, { key: 'p', label: 'p', fmt: 'p' }], norm, ['p が小さいと正規分布から外れていることを示します。']));
@@ -330,7 +360,7 @@
         if (o.student) {
           anyTest = true;
           const t = md / se, [lo, hi] = tCI(md, se, n - 1, o.alt, lv);
-          rows.push({ var: label, test: 'Student', stat: t, df: n - 1, p: tP(t, n - 1, o.alt), md, sed: se, lo, hi, es: md / sd, esType: 'Cohen の d' });
+          rows.push({ var: label, test: 'Student', stat: t, df: n - 1, p: tP(t, n - 1, o.alt), md, sed: se, lo, hi, es: md / sd, esType: 'Cohen の d', ...tBF(o, t, n, n - 1) });
         }
         if (o.nonpar) {
           anyTest = true;
@@ -349,7 +379,7 @@
       if (anyTest) out.push(table('対応のあるサンプルの t 検定', tCols(o), rows, clean([
         '差は 変数1 − 変数2 です。効果量は差の標準偏差を分母にした d（dz）です。', altNote(o, '変数1', '変数2'),
         o.nonpar ? 'Wilcoxon の統計量 V は正の順位の和です。差が0の組は除きます。' + (rows.some(r => r._method === 'normal') ? '同順位・ゼロを含むか n ≥ 50 のため、連続性補正つきの正規近似で p を求めています。' : '') : null,
-        o.diff && o.nonpar ? 'Wilcoxon の行の「平均値の差」は差の中央値です。' : null])));
+        o.diff && o.nonpar ? 'Wilcoxon の行の「平均値の差」は差の中央値です。' : null, tBFNote(o)])));
       if (o.desc) out.push(table('記述統計', [{ key: 'var', label: '', fmt: 'text' }, { key: 'n', label: 'N', fmt: 'int' }, { key: 'mean', label: '平均値' },
         { key: 'sd', label: '標準偏差' }, { key: 'se', label: '標準誤差' }, { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) }], desc));
       if (o.normality) out.push(table('差の正規性の検定（Shapiro-Wilk）', [{ key: 'var', label: '', fmt: 'text' }, { key: 'W', label: 'W' }, { key: 'p', label: 'p', fmt: 'p' }], norm));
@@ -360,6 +390,20 @@
   });
 
   // ------------------------------------------------------------ 分散分析（被験者間, 1〜2要因）
+  // 和が0の空間の正規直交基底（Helmert 型、k × (k−1)）。ベイズの分散分析で水準を対称に扱うために使う
+  function helmertQ(k) {
+    const Q = Array.from({ length: k }, () => new Array(k - 1).fill(0));
+    for (let j = 1; j < k; j++) {
+      const norm = Math.sqrt(j + j * j);
+      for (let i = 0; i < j; i++) Q[i][j - 1] = 1 / norm;
+      Q[j][j - 1] = -j / norm;
+    }
+    return Q;
+  }
+  function centerCols(X) {
+    const m = X[0].map((_, j) => S.mean(X.map(r => r[j])));
+    return X.map(r => r.map((v, j) => v - m[j]));
+  }
   // 効果コーディングの一般線形モデルで平方和 Type III を求める
   function effectCodes(levels, value) {
     const k = levels.length, j = levels.indexOf(value);
@@ -401,6 +445,7 @@
       { type: 'check', key: 'phBonf', label: 'Bonferroni', def: false },
       { type: 'check', key: 'phHolm', label: 'Holm', def: false },
       { type: 'check', key: 'phEffect', label: '効果量（Cohen の d）', def: false },
+      ...bayesOptions('事前分布の幅（固定効果の r）', 0.5),
       { type: 'heading', label: '図' },
       { type: 'check', key: 'plot', label: '平均値と信頼区間の図', def: false },
       { type: 'check', key: 'rain', label: '雨雲プロット', def: false },
@@ -453,7 +498,56 @@
       if (o.eta) cols.push({ key: 'eta', label: 'η²' });
       if (o.peta) cols.push({ key: 'peta', label: '偏 η²' });
       if (o.omega) cols.push({ key: 'omega', label: 'ω²' });
+      // ベイズファクター：モデルどうしを比べ、効果ごとの包含ベイズファクターを主表にも載せる
+      let bfTables = [];
+      if (o.bf) {
+        const r = priorOf(o, 0.5);
+        const Qs = lvls.map(l => helmertQ(l.length));
+        const blocksAll = [], Xb = idx.map(() => []);
+        const addBlock = (name, rowsOf) => {
+          const start = Xb[0].length, part = idx.map(rowsOf);
+          part.forEach((p, i) => Xb[i].push(...p));
+          blocksAll.push({ name, cols: part[0].map((_, j) => start + j) });
+        };
+        fs.forEach((f, t) => addBlock(f.name, i => Qs[t][lvls[t].indexOf(f.raw[i])]));
+        if (fs.length === 2) addBlock(terms[2].name, i => {
+          const a = Qs[0][lvls[0].indexOf(fs[0].raw[i])], b = Qs[1][lvls[1].indexOf(fs[1].raw[i])];
+          return a.flatMap(u => b.map(v => u * v));
+        });
+        const Xc = centerCols(Xb), yc = yv.map(v => v - gm);
+        // 主効果のない交互作用モデルは考えない（周辺性の原則）
+        const sets = fs.length === 1 ? [[], [0]] : [[], [0], [1], [0, 1], [0, 1, 2]];
+        const models = sets.map(set => {
+          if (!set.length) return { set, name: '帰無モデル', lbf: 0 };
+          const cols = set.flatMap(j => blocksAll[j].cols);
+          const X = Xc.map(row => cols.map(c => row[c]));
+          let off = 0;
+          const blocks = set.map(j => { const bl = { cols: blocksAll[j].cols.map((_, q) => off + q), r }; off += blocksAll[j].cols.length; return bl; });
+          return { set, name: set.map(j => blocksAll[j].name).join(' + '), lbf: S.logBfGLM(X, yc, blocks) };
+        });
+        const lz = S.logSumExp(models.map(m => m.lbf)), pm = 1 / models.length;
+        const mrows = models.map(m => {
+          const post = Math.exp(m.lbf - lz);
+          const row = { model: m.name, prior: pm, post, bfm: post / (1 - post) / (pm / (1 - pm)), ...bfCells(Math.exp(m.lbf), o) };
+          if (!m.set.length) row.ev = '（比較の基準）';
+          return row;
+        });
+        // 包含ベイズファクター：その項を含むモデル全体と含まないモデル全体の事後オッズ ÷ 事前オッズ
+        blocksAll.forEach((bl, j) => {
+          const inc = models.filter(m => m.set.includes(j)), exc = models.filter(m => !m.set.includes(j));
+          const po = S.sum(inc.map(m => Math.exp(m.lbf - lz))) / S.sum(exc.map(m => Math.exp(m.lbf - lz)));
+          const bfi = po / (inc.length / exc.length);
+          Object.assign(rows[j], { bf: bfShow(bfi, o), ev: bfEvidence(bfi) });
+        });
+        cols.push({ key: 'bf', label: o.bfType === 'bf01' ? 'BF₀₁（包含）' : o.bfType === 'log' ? 'log(BF包含)' : 'BF包含' }, { key: 'ev', label: '証拠の強さ', fmt: 'text' });
+        bfTables.push(table('ベイズファクター（モデル比較）', [{ key: 'model', label: 'モデル', fmt: 'text' }, { key: 'prior', label: 'P(M)' }, { key: 'post', label: 'P(M | データ)' },
+          { key: 'bfm', label: 'BF_M' }, { key: 'bf', label: bfLabel(o) + '（帰無モデルと比較）' }, { key: 'ev', label: '証拠の強さ', fmt: 'text' }], mrows,
+        ['どのモデルも事前確率は等しいとしています。BF_M はそのモデルの事前オッズが事後オッズに何倍変わったかです。',
+          '主表の「BF包含」は、その効果を含むモデル全体と含まないモデル全体を比べたベイズファクターです。',
+          bfNote(o, `効果の大きさに JZS 事前分布（固定効果の幅 r = ${r}；Rouder et al., 2012）`)]));
+      }
       out.push(table(`分散分析 — ${y.name}`, cols, rows, clean(['平方和は Type III です。', excluded(ds, idx)])));
+      out.push(...bfTables);
 
       // 1要因の補足
       const oneF = fs.length === 1;
@@ -546,6 +640,7 @@
       { type: 'heading', label: '表示' },
       { type: 'check', key: 'desc', label: '記述統計', def: false },
       { type: 'check', key: 'friedman', label: 'Friedman 検定', def: false },
+      ...bayesOptions('事前分布の幅（固定効果の r）', 0.5),
       { type: 'heading', label: '事後検定（対応のある t 検定）' },
       { type: 'check', key: 'posthoc', label: '事後検定を行う', def: false },
       { type: 'check', key: 'phHolm', label: 'Holm', def: true },
@@ -595,8 +690,16 @@
         { key: 'ms', label: '平均平方' }, { key: 'F', label: 'F' }, { key: 'p', label: 'p', fmt: 'p' }];
       if (o.eta) cols.push({ key: 'eta', label: 'η²' });
       if (o.peta) cols.push({ key: 'peta', label: '偏 η²' });
+      // ベイズファクター：被験者＋条件のモデルと被験者だけのモデルの比（球面性の補正には左右されないので1行目だけ）
+      let bfN = null;
+      if (o.bf) {
+        const r = priorOf(o, 0.5);
+        Object.assign(rows[0], bfCells(S.bfRM(n, k, sss, ssc, sst, r, 1), o));
+        cols.push(...bfCols(o));
+        bfN = bfNote(o, `条件の効果に JZS 事前分布（固定効果の幅 r = ${r}）、被験者の効果は変量（幅 1）。H₀ は被験者の効果だけのモデル。球面性の補正とは無関係なので「なし」の行にだけ示します`);
+      }
       const out = [table('被験者内効果', cols, rows.concat(resid), clean([`水準: ${sel.vars.join(', ')}`, excluded(ds, idx),
-        o.eta ? 'η² の分母は全平方和（被験者間の平方和を含む）です。' : null]))];
+        o.eta ? 'η² の分母は全平方和（被験者間の平方和を含む）です。' : null, bfN]))];
       out.push(table('被験者間効果', [{ key: 'term', label: '要因', fmt: 'text' }, { key: 'ss', label: '平方和' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'ms', label: '平均平方' }],
         [{ term: '残差（被験者）', ss: sss, df: n - 1, ms: sss / (n - 1) }]));
       if (o.mauchly) {
@@ -656,6 +759,7 @@
       { type: 'check', key: 'ci', label: '信頼区間（Pearson）', def: false },
       { type: 'number', key: 'ciLevel', label: '信頼水準 %', def: 95, min: 50, max: 99.9, step: 0.1 },
       { type: 'check', key: 'flag', label: '有意な相関に印をつける', def: false },
+      ...bayesOptions('事前分布の幅（伸長ベータの κ）', 1),
       { type: 'heading', label: '図' },
       { type: 'check', key: 'scatter', label: '散布図', def: false },
     ],
@@ -674,6 +778,7 @@
         const r = { n, a: cs[a].name, b: cs[b].name, x, y };
         if (n >= 3) {
           const rp = S.pearson(x, y); r.pearson = rp; r.pearsonP = S.corTest(rp, n).p; [r.lo, r.hi] = S.fisherCI(rp, n, lv);
+          if (o.bf && o.pearson) { const bf = S.bfCor(rp, n, priorOf(o, 1)); r.bfv = bfShow(bf, o); r.ev = bfEvidence(bf); }
           const rs = S.spearman(x, y); r.spearman = rs; r.spearmanP = S.corTest(rs, n).p;
           if (o.kendall) { const k = S.kendall(x, y); r.kendall = k.tau; r.kendallP = k.p; }
         }
@@ -687,6 +792,8 @@
         o.spearman && o.sig ? 'Spearman の p は t 分布による近似です。' : null,
         o.kendall && o.sig ? 'Kendall の p は、同順位がなく n < 50 なら正確な分布、そうでなければ正規近似です。' : null,
         o.ci ? 'Pearson の信頼区間は Fisher の z 変換によります。' : null,
+        o.bf && o.pearson ? bfNote(o, `相関係数 ρ に幅 κ = ${priorOf(o, 1)} の伸長ベータ分布（κ = 1 は −1〜1 の一様分布）。r の正確な尤度を使っています（Ly et al., 2016）。Pearson の相関にだけ示します`) : null,
+        o.bf && !o.pearson ? 'ベイズファクターは Pearson の相関にだけ示します。Pearson の r を選んでください。' : null,
       ]);
       if (o.layout === 'pairs') {
         const cols = [{ key: 'a', label: '', fmt: 'text' }, { key: 'dash', label: '', fmt: 'text' }, { key: 'b', label: '', fmt: 'text' }];
@@ -695,6 +802,7 @@
           cols.push({ key: m, label: l, group: l, fmt: o.flag ? 'star' : 'num' });
           if (o.sig) cols.push({ key: `${m}P`, label: 'p', group: l, fmt: 'p' });
           if (m === 'pearson' && o.ci) cols.push({ key: 'lo', label: '下限', group: l }, { key: 'hi', label: '上限', group: l });
+          if (m === 'pearson' && o.bf) cols.push({ key: 'bfv', label: bfLabel(o), group: l }, { key: 'ev', label: '証拠の強さ', group: l, fmt: 'text' });
         }
         out.push(table('相関', cols, pairs.map(r => {
           const row = { ...r, dash: '—' };
@@ -716,6 +824,7 @@
             push(l, r => ({ v: r[m], s: star(r[`${m}P`]) }));
             if (o.sig) push('p', r => ({ p: r[`${m}P`] }));
             if (m === 'pearson' && o.ci) { push('下限', r => ({ v: r.lo })); push('上限', r => ({ v: r.hi })); }
+            if (m === 'pearson' && o.bf) push(bfLabel(o), r => ({ v: r.bfv }));
           }
           if (o.n) push('N', r => ({ i: r.n }));
         });
@@ -747,6 +856,7 @@
       { type: 'check', key: 'anova', label: '分散分析表', def: true },
       { type: 'check', key: 'dw', label: 'Durbin-Watson 比', def: false },
       { type: 'check', key: 'desc', label: '記述統計', def: false },
+      ...bayesOptions('事前分布の幅（JZS の r）', 0.354),
       { type: 'heading', label: '残差の図' },
       { type: 'check', key: 'residPlot', label: '残差と予測値の散布図', def: false },
       { type: 'check', key: 'qq', label: '残差の Q-Q プロット', def: false },
@@ -779,7 +889,28 @@
       if (o.dw) { let s = 0; for (let i = 1; i < n; i++) s += (fit.resid[i] - fit.resid[i - 1]) ** 2; fitRow.dw = s / fit.sse; }
       const fc = [{ key: 'R', label: 'R' }, { key: 'R2', label: 'R²' }, { key: 'adj', label: '調整済み R²' }, { key: 'rmse', label: 'RMSE' }];
       if (o.dw) fc.push({ key: 'dw', label: 'Durbin-Watson' });
-      out.push(table(`モデルの要約 — ${y.name}`, fc, [fitRow], clean([excluded(ds, idx), fs.length ? `カテゴリ変数は最初の水準（${fs.map((f, t) => `${f.name} = ${flv[t][0]}`).join('、')}）を基準にしたダミー変数です。` : null])));
+      // ベイズファクター（Zellner-Siow 事前分布）：モデル全体は切片だけのモデルと、
+      // 各説明変数はその変数（カテゴリ変数ならダミー変数一式）を除いたモデルと比べる
+      const rReg = priorOf(o, Math.SQRT2 / 4);
+      const bfVar = new Map();
+      if (o.bf) {
+        const bfFull = S.bfRegR2(n, p - 1, R2, rReg);
+        Object.assign(fitRow, bfCells(bfFull, o));
+        fc.push(...bfCols(o));
+        const groupsOfCols = [...xs.map((c, k) => ({ key: c.name, cols: [1 + k] })),
+          ...fs.map((f, t) => ({ key: f.name, cols: flv[t].slice(1).map((_, q) => 1 + xs.length + flv.slice(0, t).reduce((s, l) => s + l.length - 1, 0) + q) }))];
+        for (const g of groupsOfCols) {
+          const keep = X[0].map((_, j) => j).filter(j => !g.cols.includes(j));
+          let bfRed = 1;
+          if (keep.length > 1) {
+            const red = S.ols(X.map(r => keep.map(j => r[j])), yv);
+            bfRed = red ? S.bfRegR2(n, keep.length - 1, 1 - red.sse / sst, rReg) : NaN;
+          }
+          g.cols.forEach(c => bfVar.set(c, bfFull / bfRed));
+        }
+      }
+      out.push(table(`モデルの要約 — ${y.name}`, fc, [fitRow], clean([excluded(ds, idx), fs.length ? `カテゴリ変数は最初の水準（${fs.map((f, t) => `${f.name} = ${flv[t][0]}`).join('、')}）を基準にしたダミー変数です。` : null,
+        o.bf ? bfNote(o, `回帰係数に Zellner-Siow（JZS）事前分布（幅 r = ${+rReg.toFixed(4)}；Liang et al., 2008）。ここでは H₀ は切片だけのモデル`) : null])));
       if (o.anova) {
         const F = (ssr / dfR) / mse;
         out.push(table('分散分析', [{ key: 'src', label: '', fmt: 'text' }, { key: 'ss', label: '平方和' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'ms', label: '平均平方' }, { key: 'F', label: 'F' }, { key: 'p', label: 'p', fmt: 'p' }],
@@ -799,6 +930,7 @@
         const row = { name: names[j], b, se, t, p: S.ptTwo(t, dfE), lo: b - q * se, hi: b + q * se };
         if (j > 0) row.beta = b * S.sd(X.map(r => r[j])) / sdy;
         if (j > 0 && o.vif) { row.vif = p === 2 ? 1 : vif ? vif[j - 1] : NaN; row.tol = 1 / row.vif; }
+        if (j > 0 && o.bf) Object.assign(row, bfCells(bfVar.get(j), o));
         return row;
       });
       const cc = [{ key: 'name', label: '', fmt: 'text' }, { key: 'b', label: 'B' }, { key: 'se', label: 'SE' }];
@@ -806,7 +938,9 @@
       cc.push({ key: 't', label: 't' }, { key: 'p', label: 'p', fmt: 'p' });
       if (o.ci) cc.push({ key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) });
       if (o.vif) cc.push({ key: 'tol', label: '許容度' }, { key: 'vif', label: 'VIF' });
-      out.push(table('係数', cc, rows, clean([o.beta && fs.length ? 'ダミー変数の β は 0/1 の標準偏差で標準化した値です。' : null])));
+      if (o.bf) cc.push(...bfCols(o));
+      out.push(table('係数', cc, rows, clean([o.beta && fs.length ? 'ダミー変数の β は 0/1 の標準偏差で標準化した値です。' : null,
+        o.bf ? `係数のベイズファクターは、すべての説明変数を含むモデルと、その変数${fs.length ? '（カテゴリ変数ならダミー変数一式）' : ''}だけを除いたモデルとの比です（H₀ = 除いたモデル）。事前分布はモデルの要約と同じです。` : null])));
       if (o.desc) {
         const dr = [y, ...xs].map(c => { const v = vals(c, idx); return { name: c.name, n: v.length, mean: S.mean(v), sd: S.sd(v), se: S.sd(v) / Math.sqrt(v.length) }; });
         out.push(table('記述統計', [{ key: 'name', label: '', fmt: 'text' }, { key: 'n', label: 'N', fmt: 'int' }, { key: 'mean', label: '平均値' }, { key: 'sd', label: '標準偏差' }, { key: 'se', label: '標準誤差' }], dr));
@@ -841,6 +975,7 @@
       { type: 'check', key: 'cramer', label: 'Cramér の V（2×2 は φ も）', def: false },
       { type: 'check', key: 'or', label: 'オッズ比（2×2 のとき）', def: false },
       { type: 'number', key: 'ciLevel', label: '信頼水準 %', def: 95, min: 50, max: 99.9, step: 0.1 },
+      ...bayesOptions('事前分布の集中度 a', 1),
     ],
     run(ds, sel, o) {
       if (!sel.rows.length || !sel.cols.length) return [];
@@ -900,9 +1035,14 @@
         tests.push({ test: '尤度比 G²', v: g, df, p: S.pchisqUpper(g, df) });
       }
       if (o.fisher && is22) { const f = S.fisher2x2(O[0][0], O[0][1], O[1][0], O[1][1]); tests.push({ test: 'Fisher の正確検定', v: null, df: null, p: f.p }); }
-      if (tests.length) out.push(table('検定', [{ key: 'test', label: '', fmt: 'text' }, { key: 'v', label: '値' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'p', label: 'p', fmt: 'p' }], tests,
+      const aPrior = priorOf(o, 1);
+      if (o.bf) { const bf = S.bfContingency(O, aPrior); tests.push({ test: `ベイズファクター ${bfLabel(o)}`, v: bfShow(bf, o), df: null, p: null, ev: bfEvidence(bf) }); }
+      const tcols = [{ key: 'test', label: '', fmt: 'text' }, { key: 'v', label: '値' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'p', label: 'p', fmt: 'p' }];
+      if (o.bf) tcols.push({ key: 'ev', label: '証拠の強さ', fmt: 'text' });
+      if (tests.length) out.push(table('検定', tcols, tests,
         clean([`N = ${N}`, minE < 5 ? `期待度数が5未満のセルがあります（最小 ${minE.toFixed(2)}）。χ² 近似が不正確になるおそれがあります。${is22 ? 'Fisher の正確検定も確認してください。' : ''}` : null,
-          (o.yates || o.fisher) && !is22 ? '連続性の補正と Fisher の正確検定は 2×2 の表だけで計算します。' : null])));
+          (o.yates || o.fisher) && !is22 ? '連続性の補正と Fisher の正確検定は 2×2 の表だけで計算します。' : null,
+          o.bf ? bfNote(o, `H₀ は行と列が独立。同時多項分布のもとで、セルの確率に集中度 a = ${aPrior} の Dirichlet 分布（Gunel & Dickey, 1974）`) : null])));
       if (o.cramer || (o.or && is22)) {
         const es = [];
         if (o.cramer) {
@@ -934,6 +1074,7 @@
       { type: 'radio', key: 'alt', options: [['two', '両側（≠ 検定比率）'], ['greater', '片側（> 検定比率）'], ['less', '片側（< 検定比率）']], def: 'two' },
       { type: 'check', key: 'ci', label: '信頼区間（Clopper-Pearson）', def: true },
       { type: 'number', key: 'ciLevel', label: '信頼水準 %', def: 95, min: 50, max: 99.9, step: 0.1 },
+      ...bayesOptions(null),
     ],
     run(ds, sel, o) {
       if (!sel.vars.length) return [];
@@ -943,13 +1084,17 @@
         levelsIn(c, idx).forEach((l, k) => {
           const x = idx.filter(i => c.raw[i] === l).length;
           const r = S.binomTest(x, n, p0, o.alt, level(o));
-          rows.push({ var: k === 0 ? name : '', lv: l, x, n, prop: x / n, p: r.p, lo: r.lo, hi: r.hi });
+          rows.push({ var: k === 0 ? name : '', lv: l, x, n, prop: x / n, p: r.p, lo: r.lo, hi: r.hi,
+            ...(o.bf && p0 > 0 && p0 < 1 ? bfCells(S.bfBinom(x, n, p0, o.alt), o) : {}) });
         });
       }
       const cols = [{ key: 'var', label: '変数', fmt: 'text' }, { key: 'lv', label: '水準', fmt: 'text' }, { key: 'x', label: '度数', fmt: 'int' }, { key: 'n', label: '合計', fmt: 'int' },
         { key: 'prop', label: '比率' }, { key: 'p', label: 'p', fmt: 'p' }];
       if (o.ci) cols.push({ key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) });
-      return [table('二項検定', cols, rows, clean([`検定する比率は ${p0} です。`, o.alt !== 'two' ? `対立仮説は片側: 比率 ${o.alt === 'greater' ? '>' : '<'} ${p0}` : null]))];
+      if (o.bf) cols.push(...bfCols(o, o.alt));
+      return [table('二項検定', cols, rows, clean([`検定する比率は ${p0} です。`, o.alt !== 'two' ? `対立仮説は片側: 比率 ${o.alt === 'greater' ? '>' : '<'} ${p0}` : null,
+        o.bf ? bfNote(o, `比率に一様分布 Beta(1, 1)${o.alt !== 'two' ? '（片側は検定比率で切断）' : ''}。H₀ は比率 = ${p0}`) : null,
+        o.bf && !(p0 > 0 && p0 < 1) ? 'ベイズファクターは検定する比率が 0 と 1 の間のときだけ計算します。' : null]))];
     },
   });
 

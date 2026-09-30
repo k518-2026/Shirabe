@@ -570,6 +570,162 @@
     return ps.slice();
   };
 
+  // ---------------------------------------------------------------- ベイズファクター
+  // どれも BF10（対立仮説 / 帰無仮説）を返す。事前分布の既定値は JASP の既定値にそろえている。
+  const logSumExp = a => { const m = Math.max(...a); if (!isFinite(m)) return m; let s = 0; for (const v of a) s += Math.exp(v - m); return m + Math.log(s); };
+  S.logSumExp = logSumExp;
+  S.dt = (t, nu) => Math.exp(S.lgamma((nu + 1) / 2) - S.lgamma(nu / 2) - 0.5 * Math.log(nu * Math.PI) - (nu + 1) / 2 * Math.log1p(t * t / nu));
+
+  // t 検定の JZS ベイズファクター（Rouder et al., 2009）。δ ~ Cauchy(0, r)。
+  // t の尤度（非心 t 分布）を「s = √(χ²/ν)」と δ の二重積分で求める。片側は δ の符号で事前分布を切る。
+  // N は有効サンプルサイズ（1群・対応あり: n、独立2群: n1·n2/(n1+n2)）、nu は自由度
+  S.bfT = function (t, N, nu, r, alt) {
+    r = r || Math.SQRT1_2; alt = alt || 'two';
+    if (!isFinite(t) || N <= 0 || nu < 1) return NaN;
+    const sq = Math.sqrt(N), k = alt === 'two' ? 1 : 2;
+    const prior = d => k / (Math.PI * r * (1 + (d / r) * (d / r)));
+    const half = nu / 2, lc = Math.log(2) + half * Math.log(half) - S.lgamma(half);
+    const spread = 12 / Math.sqrt(2 * nu), sLo = Math.max(0, 1 - spread), sHi = 1 + spread;
+    const w = 9 / sq;
+    const inner = s => {
+      const m = t * s / sq;
+      let a = m - w, b = m + w;
+      if (alt === 'greater') { a = Math.max(a, 0); b = Math.max(b, a + w); }
+      if (alt === 'less') { b = Math.min(b, 0); a = Math.min(a, b - w); }
+      return simpson(d => prior(d) * S.dnorm(t * s - d * sq), a, b, 200);
+    };
+    const num = simpson(s => (s <= 0 ? 0 : s * Math.exp(lc + (nu - 1) * Math.log(s) - half * s * s) * inner(s)), sLo, sHi, 300);
+    return num / S.dt(t, nu);
+  };
+
+  // ガウスの超幾何関数 2F1(1/2, 1/2; c; z)（0 ≤ z < 1、c > 1）
+  function hyp2f1Half(c, z) {
+    let term = 1, sum = 1;
+    for (let k = 0; k < 20000; k++) {
+      term *= (0.5 + k) * (0.5 + k) / ((c + k) * (k + 1)) * z;
+      sum += term;
+      if (term < 1e-15 * sum) break;
+    }
+    return sum;
+  }
+  // Pearson の相関のベイズファクター（Ly, Verhagen & Wagenmakers, 2016）。
+  // r の正確な尤度を使い、ρ の事前分布は幅 κ の伸長ベータ分布（κ = 1 で一様分布）
+  S.bfCor = function (r, n, kappa, alt) {
+    kappa = kappa || 1; alt = alt || 'two';
+    if (n < 3 || !isFinite(r) || Math.abs(r) >= 1) return NaN;
+    const a = 1 / kappa, c = n - 0.5;
+    const lpri = rho => (a - 1) * (Math.log1p(rho) + Math.log1p(-rho)) - (2 * a - 1) * Math.log(2) - (2 * S.lgamma(a) - S.lgamma(2 * a));
+    const llik = rho => (n - 1) / 2 * Math.log1p(-rho * rho) + (1.5 - n) * Math.log1p(-rho * r) + Math.log(hyp2f1Half(c, (1 + rho * r) / 2));
+    const l0 = Math.log(hyp2f1Half(c, 0.5));
+    const lo = alt === 'greater' ? 0 : -1, hi = alt === 'less' ? 0 : 1, m = 4000, h = (hi - lo) / m;
+    const ls = [];
+    for (let i = 0; i < m; i++) { const rho = lo + (i + 0.5) * h; ls.push(lpri(rho) + llik(rho) - l0); }
+    const k = alt === 'two' ? 1 : 2;
+    return k * Math.exp(logSumExp(ls)) * h;
+  };
+
+  // g の事前分布 IG(1/2, b) を τ = log g の格子で台形積分するための点と重み
+  function gGrid(b, npts) {
+    const lo = Math.log(b) - 7, hi = Math.log(b) + 25, h = (hi - lo) / (npts - 1), pts = [];
+    for (let i = 0; i < npts; i++) {
+      const tau = lo + i * h;
+      pts.push({ tau, g: Math.exp(tau), lw: 0.5 * Math.log(b / Math.PI) - tau / 2 - b * Math.exp(-tau) + Math.log(h) });
+    }
+    return pts;
+  }
+
+  // 線形回帰の Zellner-Siow（JZS）ベイズファクター（Liang et al., 2008）。g ~ IG(1/2, N r²/2)
+  // p は説明変数の数（切片を除く列数）
+  S.bfRegR2 = function (N, p, R2, r) {
+    r = r || Math.SQRT2 / 4;
+    if (N - p - 1 < 1 || p < 1) return NaN;
+    const ls = gGrid(N * r * r / 2, 400).map(q => q.lw + (N - p - 1) / 2 * Math.log1p(q.g) - (N - 1) / 2 * Math.log1p(q.g * (1 - R2)));
+    return Math.exp(logSumExp(ls));
+  };
+
+  // 分散分析の既定のベイズファクター（Rouder, Morey, Speckman & Province, 2012）の対数（切片だけのモデルとの比）。
+  // X は中心化した計画行列（N × p）、y は中心化した従属変数、blocks は [{cols:[列番号], r}]（項ごとに g を1つ）
+  S.logBfGLM = function (X, y, blocks) {
+    const N = y.length, p = X[0].length;
+    const XtX = Array.from({ length: p }, () => new Array(p).fill(0)), Xty = new Array(p).fill(0);
+    let yty = 0;
+    for (let i = 0; i < N; i++) {
+      yty += y[i] * y[i];
+      for (let a = 0; a < p; a++) { Xty[a] += X[i][a] * y[i]; for (let c = a; c < p; c++) XtX[a][c] += X[i][a] * X[i][c]; }
+    }
+    for (let a = 0; a < p; a++) for (let c = 0; c < a; c++) XtX[a][c] = XtX[c][a];
+    const d = blocks.length, npts = d === 1 ? 160 : d === 2 ? 70 : 40;
+    const grids = blocks.map(bl => gGrid(bl.r * bl.r / 2, npts));
+    const colBlock = new Array(p).fill(-1);
+    blocks.forEach((bl, j) => bl.cols.forEach(c => { colBlock[c] = j; }));
+    const out = [], idx = new Array(d).fill(0);
+    const V = Array.from({ length: p }, () => new Array(p).fill(0)), L = Array.from({ length: p }, () => new Array(p).fill(0)), z = new Array(p);
+    for (;;) {
+      let lw = 0, ldG = 0;
+      const gs = idx.map((ii, j) => { const q = grids[j][ii]; lw += q.lw; ldG += q.tau * blocks[j].cols.length; return q.g; });
+      for (let a = 0; a < p; a++) for (let c = 0; c < p; c++) V[a][c] = XtX[a][c] + (a === c ? 1 / gs[colBlock[a]] : 0);
+      // コレスキー分解で log|V| と Xty' V⁻¹ Xty を求める
+      let ldV = 0, ok = true;
+      for (let a = 0; a < p && ok; a++) {
+        for (let c = 0; c <= a; c++) {
+          let s = V[a][c];
+          for (let k = 0; k < c; k++) s -= L[a][k] * L[c][k];
+          if (a === c) { if (s <= 0) { ok = false; break; } L[a][a] = Math.sqrt(s); ldV += 2 * Math.log(L[a][a]); }
+          else L[a][c] = s / L[c][c];
+        }
+      }
+      if (ok) {
+        let quad = 0;
+        for (let a = 0; a < p; a++) { let s = Xty[a]; for (let k = 0; k < a; k++) s -= L[a][k] * z[k]; z[a] = s / L[a][a]; quad += z[a] * z[a]; }
+        const rest = Math.max(1e-300, 1 - quad / yty);
+        out.push(lw - 0.5 * (ldG + ldV) - (N - 1) / 2 * Math.log(rest));
+      }
+      let j = 0;
+      while (j < d && ++idx[j] === npts) { idx[j] = 0; j++; }
+      if (j === d) break;
+    }
+    return logSumExp(out);
+  };
+
+  // 1要因の反復測定：被験者（変量, r = 1）＋条件（固定, r = 0.5）のモデルと被験者だけのモデルの比。
+  // 欠損のないデータでは被験者と条件の列が直交するので、行列を使わずに閉じた式で書ける
+  S.bfRM = function (n, k, ssSubj, ssCond, ssTot, rFixed, rRandom) {
+    rFixed = rFixed || 0.5; rRandom = rRandom || 1;
+    const N = n * k;
+    const gsS = gGrid(rRandom * rRandom / 2, 160), gsC = gGrid(rFixed * rFixed / 2, 160);
+    const fs = gsS.map(q => ({ lw: q.lw, a: -(n - 1) / 2 * Math.log1p(k * q.g), s: ssSubj * k * q.g / (1 + k * q.g) }));
+    const fc = gsC.map(q => ({ lw: q.lw, a: -(k - 1) / 2 * Math.log1p(n * q.g), s: ssCond * n * q.g / (1 + n * q.g) }));
+    const lNull = logSumExp(fs.map(f => f.lw + f.a - (N - 1) / 2 * Math.log(1 - f.s / ssTot)));
+    const lFull = [];
+    for (const a of fs) for (const b of fc) lFull.push(a.lw + b.lw + a.a + b.a - (N - 1) / 2 * Math.log(Math.max(1e-300, 1 - (a.s + b.s) / ssTot)));
+    return Math.exp(logSumExp(lFull) - lNull);
+  };
+
+  // 分割表の Gunel-Dickey ベイズファクター（同時多項分布; Gunel & Dickey, 1974; Jamil et al., 2017）。
+  // H₁ はセルの確率に Dirichlet(a, …, a)、H₀（独立）は行・列の確率に Dirichlet(ξ) で、
+  // ξ_行 = J·a − (J − 1)、ξ_列 = I·a − (I − 1)（a = 1 なら どちらも一様分布）
+  S.bfContingency = function (O, a) {
+    a = a || 1;
+    const logD = v => S.sum(v.map(S.lgamma)) - S.lgamma(S.sum(v));
+    const I = O.length, J = O[0].length, xr = J * a - (J - 1), xc = I * a - (I - 1);
+    if (xr <= 0 || xc <= 0) return NaN;
+    const rep = (n, v) => new Array(n).fill(v);
+    const rs = O.map(r => S.sum(r) + xr), cs = O[0].map((_, j) => S.sum(O.map(r => r[j])) + xc);
+    const lBF01 = logD(rs) + logD(cs) - logD(rep(I, xr)) - logD(rep(J, xc)) - logD(O.flat().map(v => v + a)) + logD(rep(I * J, a));
+    return Math.exp(-lBF01);
+  };
+
+  // 二項検定のベイズファクター。比率の事前分布は Beta(a, b)（既定は一様分布 Beta(1, 1)）
+  S.bfBinom = function (x, n, p0, alt, a, b) {
+    a = a || 1; b = b || 1;
+    const lB = (u, v) => S.lgamma(u) + S.lgamma(v) - S.lgamma(u + v);
+    const l0 = x * Math.log(p0) + (n - x) * Math.log1p(-p0);
+    let l1 = lB(x + a, n - x + b) - lB(a, b);
+    if (alt === 'greater') l1 += Math.log(1 - S.ibeta(p0, x + a, n - x + b)) - Math.log(1 - S.ibeta(p0, a, b));
+    else if (alt === 'less') l1 += Math.log(S.ibeta(p0, x + a, n - x + b)) - Math.log(S.ibeta(p0, a, b));
+    return Math.exp(l1 - l0);
+  };
+
   if (typeof module !== 'undefined' && module.exports) module.exports = S;
   else root.Stats = S;
 })(typeof window !== 'undefined' ? window : globalThis);

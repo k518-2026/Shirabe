@@ -40,5 +40,24 @@ out.ct = run('contingency', { rows: ['性別'], cols: ['合格'] }, { expected: 
 out.ct3 = run('contingency', { rows: ['学級'], cols: ['合格'] }, { cramer: true, lr: true });
 out.binom = run('binomial', { vars: ['合格'] }, { p0: 0.6 });
 out.rel = run('reliability', { items: ['満足度1', '満足度2', '満足度3', '満足度4'], reverse: ['満足度3'] }, { std: true, meanr: true, scaleStats: true });
+// ベイズファクター（既定は表示しないので、上の実行結果は従来どおり）
+const timed = (label, f) => { const t0 = Date.now(); const r = f(); console.log(`  ${label}: ${Date.now() - t0} ms`); return r; };
+out.oneBF = run('ttest-one', { vars: ['事後テスト'] }, { mu: 60, bf: true });
+out.oneBFg = run('ttest-one', { vars: ['事後テスト'] }, { mu: 60, bf: true, alt: 'greater' });
+out.oneBF01 = run('ttest-one', { vars: ['事後テスト'] }, { mu: 60, bf: true, bfType: 'bf01' });
+out.indBF = run('ttest-ind', { vars: ['事後テスト'], group: ['指導法'] }, { welch: true, nonpar: true, bf: true });
+out.indBFl = run('ttest-ind', { vars: ['事後テスト'], group: ['指導法'] }, { bf: true, alt: 'less', bfPrior: 1 });
+out.pairedBF = run('ttest-paired', { pairs: [['3か月後', '事後テスト']] }, { bf: true, bfType: 'log' });
+out.anova1BF = timed('分散分析 1要因', () => run('anova', { dv: ['事後テスト'], factors: ['学級'] }, { bf: true }));
+out.anova2BF = timed('分散分析 2要因', () => run('anova', { dv: ['事後テスト'], factors: ['指導法', '学級'] }, { bf: true }));
+out.rmBF = timed('反復測定', () => run('rmanova', { vars: ['事前テスト', '事後テスト', '3か月後'] }, { bf: true, gg: true }));
+out.rm2BF = run('rmanova', { vars: ['満足度1', '満足度2', '満足度4'] }, { bf: true });
+out.corBF = run('correlation', { vars: ['事前テスト', '学習時間', '満足度1'] }, { bf: true, layout: 'pairs' });
+run('correlation', { vars: ['事前テスト', '学習時間', '満足度1'] }, { bf: true, flag: true });
+out.regBF = run('regression', { dv: ['事後テスト'], covs: ['事前テスト', '学習時間'], factors: ['学級'] }, { bf: true });
+out.ctBF = run('contingency', { rows: ['性別'], cols: ['合格'] }, { bf: true });
+out.ct3BF = run('contingency', { rows: ['学級'], cols: ['合格'] }, { bf: true, bfPrior: 2 });
+out.binomBF = run('binomial', { vars: ['合格'] }, { p0: 0.6, bf: true });
+out.binomBFg = run('binomial', { vars: ['合格'] }, { p0: 0.6, bf: true, alt: 'greater' });
 fs.writeFileSync(process.argv[2], JSON.stringify(out, (k, v) => (typeof v === 'number' && !isFinite(v) ? String(v) : v), 1));
 console.log('分析を実行しました:', Object.keys(out).length, '件');

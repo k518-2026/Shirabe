@@ -143,5 +143,87 @@ kk = it.shape[1]; alpha = kk / (kk - 1) * (1 - it.var().sum() / it.sum(axis=1).v
 chk("alpha", J["rel"]["尺度の信頼性"][0]["a"], alpha)
 rest = it.sum(axis=1) - it["満足度1"]; chk("item-rest r", J["rel"]["項目ごとの統計量"][0]["rir"], np.corrcoef(it["満足度1"], rest)[0, 1])
 
+# ---------------------------------------------------------------- ベイズファクター
+# 参照値は ref_bayes.py の関数（stats.js とは別の積分方法）で求める
+sys.path.insert(0, str(Path(__file__).parent))
+import ref_bayes as RB
+def chkr(name, got, exp, tol=1e-4):  # 相対誤差で比べる
+    global fails
+    got = float(got); exp = float(exp)
+    ok = abs(got - exp) <= tol * abs(exp)
+    if not ok: fails += 1
+    print(("OK " if ok else "NG ") + f"{name}: {got:.8g} / {exp:.8g}")
+
+# t 検定（アプリの既定の幅は JASP の画面と同じ 0.707。√2/2 = 0.70711 ではない）
+RT = 0.707
+x = df["事後テスト"]; n = len(x); tt = stats.ttest_1samp(x, 60).statistic
+chkr("BF 1サンプル", row(J["oneBF"]["1サンプルの t 検定"], test="Student")["bf"], RB.jzs_two(tt, n, n - 1, r=RT))
+chkr("BF+0 1サンプル", row(J["oneBFg"]["1サンプルの t 検定"], test="Student")["bf"], RB.jzs_one(tt, n, n - 1, "greater", r=RT))
+chkr("BF01 1サンプル", row(J["oneBF01"]["1サンプルの t 検定"], test="Student")["bf"], 1 / RB.jzs_two(tt, n, n - 1, r=RT))
+a = df.loc[df["指導法"] == "協同学習", "事後テスト"]; b = df.loc[df["指導法"] == "従来型", "事後テスト"]
+tt = stats.ttest_ind(a, b).statistic; Ne = len(a) * len(b) / (len(a) + len(b)); nu = len(a) + len(b) - 2
+t = J["indBF"]["独立したサンプルの t 検定"]
+chkr("BF 独立2群", row(t, test="Student")["bf"], RB.jzs_two(tt, Ne, nu, r=RT))
+chk("BF は Welch・Mann-Whitney の行に出さない", sum("bf" in row(t, test=k) for k in ("Welch", "Mann-Whitney")), 0)
+chkr("BF-0 独立2群 r=1", row(J["indBFl"]["独立したサンプルの t 検定"], test="Student")["bf"], RB.jzs_one(tt, Ne, nu, "less", r=1.0))
+s = df[["3か月後", "事後テスト"]].dropna(); tt = stats.ttest_rel(s["3か月後"], s["事後テスト"]).statistic
+chkr("log BF 対応あり", row(J["pairedBF"]["対応のあるサンプルの t 検定"], test="Student")["bf"], np.log(RB.jzs_two(tt, len(s), len(s) - 1, r=RT)), 1e-3)
+
+# 分散分析（被験者間）
+levA = sorted(df["学級"].unique()); ia = df["学級"].map(levA.index).to_numpy(); yv = df["事後テスト"].to_numpy(float)
+l1 = RB.logbf_glm(RB.helmert(3)[ia], yv, [{"cols": [0, 1], "r": 0.5}])
+chkr("BF 1要因（包含 = BF10）", J["anova1BF"]["分散分析 — 事後テスト"][0]["bf"], np.exp(l1))
+levM = sorted(df["指導法"].unique()); im = df["指導法"].map(levM.index).to_numpy()
+QA, QB = RB.helmert(2)[im], RB.helmert(3)[ia]
+QAB = np.einsum("ni,nj->nij", QA, QB).reshape(len(yv), -1)
+Xall = np.hstack([QA, QB, QAB])
+lm = {"指導法": RB.logbf_glm(QA, yv, [{"cols": [0], "r": 0.5}]),
+      "学級": RB.logbf_glm(QB, yv, [{"cols": [0, 1], "r": 0.5}]),
+      "指導法 + 学級": RB.logbf_glm(np.hstack([QA, QB]), yv, [{"cols": [0], "r": 0.5}, {"cols": [1, 2], "r": 0.5}]),
+      "指導法 + 学級 + 指導法 ✻ 学級": RB.logbf_glm(Xall, yv, [{"cols": [0], "r": 0.5}, {"cols": [1, 2], "r": 0.5}, {"cols": [3, 4], "r": 0.5}], qmc_m=17)}
+mt = J["anova2BF"]["ベイズファクター（モデル比較）"]
+for name, l in lm.items():
+    chkr(f"BF モデル {name}", row(mt, model=name)["bf"], np.exp(l), 1e-4 if "✻" not in name else 5e-3)
+L = np.array([0.0] + list(lm.values())); post = np.exp(L - L.max()); post /= post.sum()
+chkr("P(M|データ) 最良モデル", max(r["post"] for r in mt), post.max(), 5e-3)
+sets = [set(), {0}, {1}, {0, 1}, {0, 1, 2}]
+main = J["anova2BF"]["分散分析 — 事後テスト"]
+for j in range(3):
+    inc = [p for p, st in zip(post, sets) if j in st]; exc = [p for p, st in zip(post, sets) if j not in st]
+    chkr(f"BF包含 項{j}", main[j]["bf"], (sum(inc) / sum(exc)) / (len(inc) / len(exc)), 5e-3)
+
+# 反復測定：被験者の指示変数（r = 1）＋条件の対比（r = 0.5）を一般の行列式で
+for key, cols in (("rmBF", ["事前テスト", "事後テスト", "3か月後"]), ("rm2BF", ["満足度1", "満足度2", "満足度4"])):
+    Y = df[cols].dropna().to_numpy(float); nn, kk = Y.shape
+    subj = np.repeat(np.eye(nn), kk, axis=0); cond = np.tile(RB.helmert(kk), (nn, 1)); yy = Y.ravel()
+    full = RB.logbf_glm(np.hstack([subj, cond]), yy, [{"cols": list(range(nn)), "r": 1.0}, {"cols": [nn, nn + 1], "r": 0.5}])
+    null = RB.logbf_glm(subj, yy, [{"cols": list(range(nn)), "r": 1.0}])
+    chkr(f"BF 反復測定 {cols[0]}…", J[key]["被験者内効果"][0]["bf"], np.exp(full - null), 1e-3)
+
+# 相関
+for v1, v2 in itertools.combinations(["事前テスト", "学習時間", "満足度1"], 2):
+    s = df[[v1, v2]].dropna(); r = row(J["corBF"]["相関"], a=v1, b=v2)
+    chkr(f"BF 相関 {v1}-{v2}", r["bfv"], RB.bf_cor(stats.pearsonr(s[v1], s[v2]).statistic, len(s)))
+
+# 回帰（JZS, r = 0.354）
+s = df[["事後テスト", "事前テスト", "学習時間", "学級"]].dropna(); N = len(s)
+R2 = lambda f: smf.ols(f, s).fit().rsquared
+full = RB.bf_reg(N, 4, R2("事後テスト ~ 事前テスト + 学習時間 + C(学級)"), r=0.354)
+chkr("BF 回帰モデル", J["regBF"]["モデルの要約 — 事後テスト"][0]["bf"], full)
+t = J["regBF"]["係数"]
+chkr("BF 係数 事前テスト", row(t, name="事前テスト")["bf"], full / RB.bf_reg(N, 3, R2("事後テスト ~ 学習時間 + C(学級)"), r=0.354))
+chkr("BF 係数 学習時間", row(t, name="学習時間")["bf"], full / RB.bf_reg(N, 3, R2("事後テスト ~ 事前テスト + C(学級)"), r=0.354))
+chkr("BF 係数 学級（C組）", row(t, name="学級 (C組)")["bf"], full / RB.bf_reg(N, 2, R2("事後テスト ~ 事前テスト + 学習時間"), r=0.354))
+
+# 分割表・二項
+tab = pd.crosstab(df["性別"], df["合格"]).to_numpy()
+chkr("BF 分割表 2×2（直接積分）", row(J["ctBF"]["検定"], test="ベイズファクター BF₁₀")["v"], RB.bf_ct22(tab.tolist()))
+tab3 = pd.crosstab(df["学級"], df["合格"]).to_numpy()
+chkr("BF 分割表 3×2 a=2", row(J["ct3BF"]["検定"], test="ベイズファクター BF₁₀")["v"], RB.bf_ct_dirichlet(tab3, 2.0))
+kk = int((df["合格"] == "はい").sum()); nn = len(df)
+chkr("BF 二項 はい", row(J["binomBF"]["二項検定"], lv="はい")["bf"], RB.bf_binom(kk, nn, 0.6))
+chkr("BF 二項 いいえ", row(J["binomBF"]["二項検定"], lv="いいえ")["bf"], RB.bf_binom(nn - kk, nn, 0.6))
+chkr("BF+0 二項 はい", row(J["binomBFg"]["二項検定"], lv="はい")["bf"], RB.bf_binom(kk, nn, 0.6, "greater"))
+
 print(f"\n{fails} 件不一致" if fails else "\nすべて一致")
 sys.exit(1 if fails else 0)

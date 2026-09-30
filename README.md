@@ -28,6 +28,25 @@ JASP のような「左でデータと変数を選ぶ → 右に APA 形式の�
 | | 二項検定 | 片側検定、Clopper-Pearson の信頼区間 |
 | 尺度 | 信頼性分析 | Cronbach の α、標準化 α、逆転項目、項目－残余相関、項目を除いた α |
 
+## ベイズファクター
+
+t 検定・分散分析・相関・線形回帰・分割表・二項検定では、「ベイズファクターを表示」にチェックを入れると、
+p 値と同じ表にベイズファクターと証拠の強さの目安（Lee & Wagenmakers, 2013）が並びます。
+BF₁₀・BF₀₁・log(BF₁₀) を切り替えられ、事前分布の幅も変えられます。既定値は JASP の既定値と同じです。
+
+| 分析 | ベイズファクター | 事前分布（既定） |
+|---|---|---|
+| t 検定（3種） | JZS ベイズファクター（Rouder et al., 2009）。片側検定にも対応。Student の t 検定の行に表示 | 効果量 δ に Cauchy 分布、幅 r = 0.707 |
+| 分散分析（被験者間） | モデル比較（帰無・主効果・加法・交互作用つき）と効果ごとの包含ベイズファクター（Rouder et al., 2012） | 固定効果に JZS 事前分布、r = 0.5 |
+| 反復測定の分散分析 | 被験者＋条件のモデルと被験者だけのモデルの比 | 固定効果 r = 0.5、被験者（変量効果）r = 1 |
+| 相関 | Pearson の相関。r の正確な尤度による（Ly et al., 2016） | 伸長ベータ分布、幅 κ = 1（一様分布） |
+| 線形回帰 | モデル全体（対 切片だけ）と各説明変数（対 その変数を除いたモデル） | Zellner-Siow（JZS）事前分布、r = 0.354（Liang et al., 2008） |
+| 分割表 | Gunel-Dickey ベイズファクター、同時多項分布（Jamil et al., 2017） | Dirichlet 分布、集中度 a = 1 |
+| 二項検定 | 片側検定にも対応 | 一様分布 Beta(1, 1) |
+
+- 記述統計・信頼性分析と、ノンパラメトリック検定・Welch の検定の行には表示しません。
+- 線形回帰の説明変数ごとのベイズファクターは「その変数を除いたモデルとの比」です。JASP のベイズ線形回帰が示す、すべてのモデルで平均した包含ベイズファクター（BAS パッケージ）とは定義が違います。
+
 ## 使い方
 
 1. 「開く」で CSV・TSV ファイルを選ぶか、Excel などでコピーした表を「貼り付け」ます（1行目は変数名）。「サンプル」で架空の授業データを試せます。
@@ -49,7 +68,13 @@ python tests/ref_core.py core.json
 node tests/verify_core.js core.json
 node tests/run_analyses.js analyses.json
 python tests/verify_analyses.py analyses.json
+python tests/ref_bayes.py bayes.json
+node tests/verify_bayes.js bayes.json
 ```
+
+ベイズファクターは R の BayesFactor パッケージ（JASP の計算エンジン）では確かめていません。
+代わりに、同じ事前分布とモデルのもとで、Shirabe とは別の方法で積分した値（SciPy）と照合しています。
+たとえば t 検定なら、Shirabe は δ と s の二重積分で、照合用は Rouder et al. (2009) の g による1次元積分です。
 
 SciPy・statsmodels・R（JASP の計算エンジン）と結果が違う場合があるのは、主に次の点です。
 
