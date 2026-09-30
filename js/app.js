@@ -156,7 +156,7 @@
   function inlineSvg(svg) {
     const cs = getComputedStyle(document.documentElement);
     let s = svg.outerHTML.replace(/var\((--[\w-]+)\)/g, (_, v) => cs.getPropertyValue(v).trim());
-    const style = `<style>.grid{stroke:#ddd}.axis{stroke:#444}.tick{fill:#333;font:12px sans-serif}.lab{fill:#222;font:13px sans-serif}.bar{fill:${cs.getPropertyValue('--plot-1').trim()};fill-opacity:.8}.dot{fill:${cs.getPropertyValue('--plot-1').trim()};fill-opacity:.7}.fitline{stroke:${cs.getPropertyValue('--plot-2').trim()};stroke-width:2}.whisker{stroke:#555}.outlier{fill:none;stroke:#555}</style>`;
+    const style = `<style>.grid{stroke:#ddd}.axis{stroke:#444}.tick{fill:#333;font:12px sans-serif}.lab{fill:#222;font:13px sans-serif}.bar{fill:${cs.getPropertyValue('--plot-1').trim()};fill-opacity:.8}.dot{fill:${cs.getPropertyValue('--plot-1').trim()};fill-opacity:.7}.fitline{stroke:${cs.getPropertyValue('--plot-2').trim()};stroke-width:2}.whisker{stroke:#555}.outlier{fill:none;stroke:#555}.pairline{stroke:#555;stroke-opacity:.25}</style>`;
     return s.replace(/^<svg([^>]*)>/, `<svg$1>${style}`);
   }
   function download(name, content, type) {

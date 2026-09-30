@@ -188,7 +188,9 @@
     ...(extra.welch ? [{ type: 'check', key: 'levene', label: '等分散性（Levene）', def: false }] : []),
     { type: 'heading', label: '図' },
     { type: 'check', key: 'plot', label: '平均値と信頼区間の図', def: false },
+    { type: 'check', key: 'rain', label: '雨雲プロット', def: false },
   ];
+  const RAIN_NOTE = '雨雲プロット：右の雲はデータの分布（カーネル密度）、中央は箱ひげ図、左の点は一人ひとりの値です。';
   const tCols = (o, hasDF) => {
     const c = [{ key: 'var', label: '', fmt: 'text' }, { key: 'test', label: '検定', fmt: 'text' },
       { key: 'stat', label: '統計量' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'p', label: 'p', fmt: 'p' }];
@@ -234,6 +236,11 @@
         { key: 'sd', label: '標準偏差' }, { key: 'se', label: '標準誤差' }, { key: 'median', label: '中央値' }, { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) }], desc));
       if (o.normality) out.push(table('正規性の検定（Shapiro-Wilk）', [{ key: 'var', label: '', fmt: 'text' }, { key: 'W', label: 'W' }, { key: 'p', label: 'p', fmt: 'p' }], norm, ['p が小さいと正規分布から外れていることを示します。']));
       if (o.plot) for (const d of desc) out.push(plot(`平均値 — ${d.var}`, P.means([d.var], [''], [{ x: 0, s: 0, m: d.mean, lo: d.lo, hi: d.hi }], '', d.var)));
+      if (o.rain) for (const d of desc) {
+        const c = col(ds, d.var), x = vals(c, D.complete(ds, [c]));
+        out.push(plot(`雨雲プロット — ${d.var}`, P.raincloud([{ x: 0, s: 0, v: x }], [d.var], [''], '', d.var)));
+      }
+      if (o.rain && desc.length) out.push(note(RAIN_NOTE));
       return out;
     },
   });
@@ -249,7 +256,7 @@
     run(ds, sel, o) {
       if (!sel.vars.length || !sel.group.length) return [];
       const g = col(ds, sel.group[0]), lv = level(o);
-      const rows = [], desc = [], norm = [], lev = [], out = [], plots = [];
+      const rows = [], desc = [], norm = [], lev = [], out = [], plots = [], rains = [];
       let g1, g2, anyTest = false;
       for (const name of sel.vars) {
         const c = col(ds, name), idx = D.complete(ds, [c, g]);
@@ -285,6 +292,7 @@
         const L = S.levene([x, y]); if (L) lev.push({ var: name, F: L.F, df1: L.df1, df2: L.df2, p: L.p });
         const d2 = desc.slice(-2);
         plots.push(plot(`平均値 — ${name}`, P.means([g1, g2], [''], d2.map((d, k) => ({ x: k, s: 0, m: d.mean, lo: d.lo, hi: d.hi })), g.name, name)));
+        rains.push(plot(`雨雲プロット — ${name}`, P.raincloud([{ x: 0, s: 0, v: x }, { x: 1, s: 0, v: y }], [g1, g2], [''], g.name, name)));
       }
       if (anyTest) out.push(table('独立したサンプルの t 検定', tCols(o), rows, clean([
         `群1 = ${g1}、群2 = ${g2}。平均値の差は 群1 − 群2 です。`, altNote(o, '群1', '群2'),
@@ -297,6 +305,7 @@
       if (o.levene) out.push(table('等分散性の検定（Levene）', [{ key: 'var', label: '', fmt: 'text' }, { key: 'F', label: 'F' }, { key: 'df1', label: '自由度1', fmt: 'df' }, { key: 'df2', label: '自由度2', fmt: 'df' }, { key: 'p', label: 'p', fmt: 'p' }], lev,
         ['平均値からの絶対偏差を使う Levene 検定です。p が小さいときは Welch の t 検定を使ってください。']));
       if (o.plot) out.push(...plots);
+      if (o.rain && rains.length) out.push(...rains, note(RAIN_NOTE));
       return out;
     },
   });
@@ -310,7 +319,7 @@
       const pairs = sel.pairs.filter(p => p[0] && p[1]);
       if (!pairs.length) return [];
       const lv = level(o);
-      const rows = [], desc = [], norm = [], out = [], plots = [];
+      const rows = [], desc = [], norm = [], out = [], plots = [], rains = [];
       let anyTest = false;
       for (const [a, b] of pairs) {
         const ca = col(ds, a), cb = col(ds, b), idx = D.complete(ds, [ca, cb]);
@@ -335,6 +344,7 @@
         }
         const sw = S.shapiroWilk(d); norm.push({ var: label, W: sw ? sw.W : NaN, p: sw ? sw.p : NaN });
         plots.push(plot(`平均値 — ${label}`, P.means([a, b], [''], pd.map((q, k) => ({ x: k, s: 0, ...q })), '', '平均値')));
+        rains.push(plot(`雨雲プロット — ${label}`, P.raincloud([{ x: 0, s: 0, v: x }, { x: 1, s: 0, v: y }], [a, b], [''], '', '値', { paired: true })));
       }
       if (anyTest) out.push(table('対応のあるサンプルの t 検定', tCols(o), rows, clean([
         '差は 変数1 − 変数2 です。効果量は差の標準偏差を分母にした d（dz）です。', altNote(o, '変数1', '変数2'),
@@ -344,6 +354,7 @@
         { key: 'sd', label: '標準偏差' }, { key: 'se', label: '標準誤差' }, { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) }], desc));
       if (o.normality) out.push(table('差の正規性の検定（Shapiro-Wilk）', [{ key: 'var', label: '', fmt: 'text' }, { key: 'W', label: 'W' }, { key: 'p', label: 'p', fmt: 'p' }], norm));
       if (o.plot) out.push(...plots);
+      if (o.rain && rains.length) out.push(...rains, note(RAIN_NOTE + '灰色の線は同じ人の2つの値をつないでいます。'));
       return out;
     },
   });
@@ -392,6 +403,7 @@
       { type: 'check', key: 'phEffect', label: '効果量（Cohen の d）', def: false },
       { type: 'heading', label: '図' },
       { type: 'check', key: 'plot', label: '平均値と信頼区間の図', def: false },
+      { type: 'check', key: 'rain', label: '雨雲プロット', def: false },
       { type: 'number', key: 'ciLevel', label: '信頼水準 %', def: 95, min: 50, max: 99.9, step: 0.1 },
     ],
     run(ds, sel, o) {
@@ -510,6 +522,11 @@
         const pc = cellList.map(c => ({ x: xs.indexOf(c.f1), s: fs.length === 2 ? ser.indexOf(c.f2) : 0, m: c.mean, lo: c.lo, hi: c.hi }));
         out.push(plot(`平均値 — ${y.name}`, P.means(xs, ser, pc, fs[0].name, y.name)));
       }
+      if (o.rain) {
+        const xs = lvls[0], ser = fs.length === 2 ? lvls[1] : [''];
+        const gs = combos.map(cmb => ({ x: xs.indexOf(cmb[0]), s: fs.length === 2 ? ser.indexOf(cmb[1]) : 0, v: cells.get(cmb.join('\u0001')) || [] }));
+        out.push(plot(`雨雲プロット — ${y.name}`, P.raincloud(gs, xs, ser, fs[0].name, y.name)), note(RAIN_NOTE));
+      }
       return out;
     },
   });
@@ -535,6 +552,7 @@
       { type: 'check', key: 'phBonf', label: 'Bonferroni', def: false },
       { type: 'heading', label: '図' },
       { type: 'check', key: 'plot', label: '平均値と信頼区間の図', def: false },
+      { type: 'check', key: 'rain', label: '雨雲プロット', def: false },
       { type: 'number', key: 'ciLevel', label: '信頼水準 %', def: 95, min: 50, max: 99.9, step: 0.1 },
     ],
     run(ds, sel, o) {
@@ -616,6 +634,8 @@
         out.push(table('事後検定', cc, comps, ['各対を対応のある t 検定で比べ、p 値を補正しています。']));
       }
       if (o.plot) out.push(plot('平均値', P.means(cs.map(c => c.name), [''], desc.map((d, j) => ({ x: j, s: 0, m: d.mean, lo: d.lo, hi: d.hi })), '', '平均値')));
+      if (o.rain) out.push(plot('雨雲プロット', P.raincloud(cs.map((c, j) => ({ x: j, s: 0, v: Y.map(r => r[j]) })), cs.map(c => c.name), [''], '', '値', { paired: true })),
+        note(RAIN_NOTE + '灰色の線は同じ人の隣り合う水準の値をつないでいます。'));
       return out;
     },
   });

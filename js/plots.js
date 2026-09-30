@@ -176,6 +176,77 @@
     return svg(b, `${xlab} の度数`);
   };
 
+  // 雨雲プロット（raincloud plot）：片側の密度（雲）＋ 箱ひげ図 ＋ ずらした個々の点（雨）
+  // groups: [{x: 水準番号, s: 系列番号, v: 値の配列}]
+  // opt.paired が真なら、各群の同じ位置の値を同じ人とみなして線でつなぐ
+  P.raincloud = function (groups, xLabels, seriesLabels, xlab, ylab, opt = {}) {
+    const all = groups.flatMap(g => g.v);
+    if (!all.length) return '';
+    const S = root.Stats;
+    const ns = Math.max(1, seriesLabels.length);
+    const yr = pad(Math.min(...all), Math.max(...all), 0.08);
+    // 凡例があるときは、凡例の高さ分だけ上に余白をとって雲と重ならないようにする
+    if (ns > 1) { const plotH = H - M.t - M.b, legH = 10 + ns * 18; yr[1] += (yr[1] - yr[0]) * legH / (plotH - legH); }
+    const f = frame([0, xLabels.length], yr, { xlab, ylab, categorical: true });
+    let b = f.g;
+    const slot = (f.x1 - f.x0) / xLabels.length, w = slot / ns;
+    // 点の横のずれは種を固定した乱数で決める（描き直しても同じ図になる）
+    let seed = 12345;
+    const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+    const pos = [];
+    groups.forEach((g, gi) => {
+      const v = g.v; if (!v.length) { pos.push([]); return; }
+      const c = f.x0 + slot * g.x + w * (g.s + 0.5);
+      const col = SERIES[(ns > 1 ? g.s : g.x) % SERIES.length];
+      const s = S.sorted(v), n = s.length;
+      // 雲：ガウス核の密度推定（帯域は Silverman の目安 = R の bw.nrd0）
+      if (n >= 2 && s[n - 1] > s[0]) {
+        const sd = S.sd(s), iqr = S.quantile(s, 0.75, true) - S.quantile(s, 0.25, true);
+        const bw = 0.9 * Math.min(sd, iqr > 0 ? iqr / 1.34 : sd) * Math.pow(n, -0.2) || sd;
+        const lo = s[0] - bw, hi = s[n - 1] + bw, m = 80;
+        const ys = [], ds = [];
+        for (let k = 0; k <= m; k++) {
+          const y = lo + (hi - lo) * k / m;
+          let d = 0; for (const x of s) d += Math.exp(-0.5 * ((y - x) / bw) ** 2);
+          ys.push(Math.min(yr[1], Math.max(yr[0], y))); ds.push(d);
+        }
+        const dmax = Math.max(...ds), half = w * 0.42;
+        const pts = ys.map((y, k) => `${(c + 2 + ds[k] / dmax * half).toFixed(1)},${f.sy(y).toFixed(1)}`);
+        b += `<path d="M${c + 2},${f.sy(ys[0]).toFixed(1)} L${pts.join(' L')} L${c + 2},${f.sy(ys[m]).toFixed(1)} Z" style="fill:${col};fill-opacity:.35;stroke:${col}" stroke-width="1.2"/>`;
+      }
+      // 箱ひげ図（細め）
+      const q1 = S.quantile(s, 0.25, true), md = S.quantile(s, 0.5, true), q3 = S.quantile(s, 0.75, true), iq = q3 - q1;
+      const wl = s.find(x => x >= q1 - 1.5 * iq), wh = [...s].reverse().find(x => x <= q3 + 1.5 * iq);
+      const bx = c - w * 0.07, bwid = Math.min(14, w * 0.1);
+      b += `<line x1="${bx}" x2="${bx}" y1="${f.sy(wl)}" y2="${f.sy(wh)}" class="whisker"/>`;
+      b += `<rect x="${bx - bwid / 2}" y="${f.sy(q3)}" width="${bwid}" height="${Math.max(1, f.sy(q1) - f.sy(q3))}" style="fill:var(--panel);stroke:${col}" stroke-width="1.5"><title>Q1 ${fmtTick(q1)} / 中央値 ${fmtTick(md)} / Q3 ${fmtTick(q3)}</title></rect>`;
+      b += `<line x1="${bx - bwid / 2}" x2="${bx + bwid / 2}" y1="${f.sy(md)}" y2="${f.sy(md)}" style="stroke:${col}" stroke-width="2.5"/>`;
+      // 雨：個々の点
+      const px = v.map(() => c - w * (0.18 + 0.2 * rnd()));
+      pos.push(v.map((y, k) => [px[k], f.sy(y)]));
+      void gi;
+    });
+    if (opt.paired) {
+      for (let a = 0; a + 1 < pos.length; a++) {
+        const A = pos[a], B = pos[a + 1];
+        for (let k = 0; k < Math.min(A.length, B.length); k++) b += `<line x1="${A[k][0].toFixed(1)}" y1="${A[k][1].toFixed(1)}" x2="${B[k][0].toFixed(1)}" y2="${B[k][1].toFixed(1)}" class="pairline"/>`;
+      }
+    }
+    pos.forEach((ps, gi) => {
+      const g = groups[gi], col = SERIES[(ns > 1 ? g.s : g.x) % SERIES.length];
+      for (const [x, y] of ps) b += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.8" style="fill:${col}" fill-opacity=".75"/>`;
+    });
+    xLabels.forEach((l, i) => { b += `<text x="${f.sx(i + 0.5)}" y="${f.y0 + 19}" text-anchor="middle" class="tick">${esc(l)}</text>`; });
+    if (ns > 1) {
+      seriesLabels.forEach((sl, s) => {
+        const y = M.t + 6 + s * 18;
+        b += `<circle cx="${W - M.r - 110}" cy="${y}" r="5" style="fill:${SERIES[s % SERIES.length]}"/>`;
+        b += `<text x="${W - M.r - 100}" y="${y + 4}" class="tick">${esc(sl)}</text>`;
+      });
+    }
+    return svg(b, `${ylab} の雨雲プロット`);
+  };
+
   if (typeof module !== 'undefined' && module.exports) module.exports = P;
   else root.Plots = P;
 })(typeof window !== 'undefined' ? window : globalThis);
