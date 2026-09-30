@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shirabe — ブラウザーで動く統計ソフト</title>
+<meta name="description" content="インストール不要、データを送信しない、ブラウザーだけで動く統計解析ソフト。記述統計・t 検定・分散分析・相関・回帰・分割表・信頼性分析。">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23176b87'/%3E%3Cpath d='M7 24V16M13 24V9M19 24V13M25 24V6' stroke='%23fff' stroke-width='3.2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><path d="M7 24V16M13 24V9M19 24V13M25 24V6"/></svg><span class="bname">Shirabe</span><span class="bsub">統計解析</span></div>
+  <nav id="menu" class="menu" aria-label="分析メニュー"></nav>
+  <div class="tools">
+    <button id="btnData" title="データ表を表示">データ</button>
+    <button id="btnOpen" title="CSV・TSV ファイルを開く">開く</button>
+    <button id="btnPaste" title="コピーした表を貼り付ける">貼り付け</button>
+    <button id="btnSample" title="サンプルデータを読み込む">サンプル</button>
+    <button id="btnSaveCsv" title="データを CSV で保存（尺度の変更は含みません）">CSV 保存</button>
+    <button id="btnExport" title="結果を HTML ファイルで保存">結果を保存</button>
+    <button id="btnPrint" title="結果を印刷・PDF に保存">印刷</button>
+    <button id="btnAbout" title="このソフトについて">?</button>
+  </div>
+  <input type="file" id="file" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" hidden>
+</header>
+<main class="main">
+  <aside id="left" class="left"></aside>
+  <div id="splitter" class="splitter" role="separator" aria-orientation="vertical" title="ドラッグで幅を変える"></div>
+  <section id="results" class="results" aria-live="polite"></section>
+</main>
+<div id="toast" class="toast" role="status"></div>
+
+<dialog id="pasteDlg">
+  <form method="dialog">
+    <h2>表を貼り付ける</h2>
+    <p class="small">Excel・Google スプレッドシートでセル範囲をコピーし、下の欄に貼り付けてください（Ctrl+V）。1行目は変数名にします。カンマ区切りの文字も読めます。</p>
+    <textarea id="pasteText" rows="14" spellcheck="false" aria-label="貼り付ける表"></textarea>
+    <div class="dlgbtns"><button id="pasteCancel">キャンセル</button><button id="pasteOk" class="primary">読み込む</button></div>
+  </form>
+</dialog>
+
+<dialog id="aboutDlg">
+  <h2>Shirabe について</h2>
+  <p>ブラウザーの中だけで動く統計解析ソフトです。データはどこにも送信されません。</p>
+  <ul class="small">
+    <li>すべての計算はこのソフト独自の JavaScript 実装です。主な結果は Python の SciPy・statsmodels と突き合わせて確かめています。</li>
+    <li>統計の計算はどれも完璧ではありません。大事な分析では、R・JASP などほかのソフトでも結果を確かめてください。</li>
+    <li>Shirabe は JASP を参考にした操作感を目指していますが、JASP のソースコード・画像・データは一切使っていない独立したソフトです。JASP チームやアムステルダム大学とは関係がありません。JASP はアムステルダム大学の商標です。</li>
+  </ul>
+  <p class="small">MIT License / Copyright (c) 2026 K.Yamamoto</p>
+  <div class="dlgbtns"><button id="aboutClose" class="primary">閉じる</button></div>
+</dialog>
+
+<script src="js/stats.js"></script>
+<script src="js/data.js"></script>
+<script src="js/plots.js"></script>
+<script src="js/analyses.js"></script>
+<script src="samples/sample.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
