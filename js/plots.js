@@ -184,7 +184,25 @@
     if (!all.length) return '';
     const S = root.Stats;
     const ns = Math.max(1, seriesLabels.length);
-    const yr = pad(Math.min(...all), Math.max(...all), 0.08);
+    // 雲：ガウス核の密度推定（帯域は Silverman の目安 = R の bw.nrd0）。
+    // R の density() と同じく帯域の3倍まで裾を伸ばし、端が0近くまで細くなるようにする
+    const clouds = groups.map(g => {
+      const s = S.sorted(g.v), n = s.length;
+      if (n < 2 || s[n - 1] <= s[0]) return null;
+      const sd = S.sd(s), iqr = S.quantile(s, 0.75, true) - S.quantile(s, 0.25, true);
+      const bw = 0.9 * Math.min(sd, iqr > 0 ? iqr / 1.34 : sd) * Math.pow(n, -0.2) || sd;
+      const lo = s[0] - 3 * bw, hi = s[n - 1] + 3 * bw, m = 120;
+      const ys = [], ds = [];
+      for (let k = 0; k <= m; k++) {
+        const y = lo + (hi - lo) * k / m;
+        let d = 0; for (const x of s) d += Math.exp(-0.5 * ((y - x) / bw) ** 2);
+        ys.push(y); ds.push(d);
+      }
+      return { ys, ds, lo, hi };
+    });
+    // 縦軸は雲の裾まで入る範囲にする（範囲外を切り詰めると雲の端が平らになる）
+    const lows = clouds.filter(Boolean).map(c => c.lo), highs = clouds.filter(Boolean).map(c => c.hi);
+    const yr = pad(Math.min(...all, ...lows), Math.max(...all, ...highs), 0.03);
     // 凡例があるときは、凡例の高さ分だけ上に余白をとって雲と重ならないようにする
     if (ns > 1) { const plotH = H - M.t - M.b, legH = 10 + ns * 18; yr[1] += (yr[1] - yr[0]) * legH / (plotH - legH); }
     const f = frame([0, xLabels.length], yr, { xlab, ylab, categorical: true });
@@ -198,21 +216,12 @@
       const v = g.v; if (!v.length) { pos.push([]); return; }
       const c = f.x0 + slot * g.x + w * (g.s + 0.5);
       const col = SERIES[(ns > 1 ? g.s : g.x) % SERIES.length];
-      const s = S.sorted(v), n = s.length;
-      // 雲：ガウス核の密度推定（帯域は Silverman の目安 = R の bw.nrd0）
-      if (n >= 2 && s[n - 1] > s[0]) {
-        const sd = S.sd(s), iqr = S.quantile(s, 0.75, true) - S.quantile(s, 0.25, true);
-        const bw = 0.9 * Math.min(sd, iqr > 0 ? iqr / 1.34 : sd) * Math.pow(n, -0.2) || sd;
-        const lo = s[0] - bw, hi = s[n - 1] + bw, m = 80;
-        const ys = [], ds = [];
-        for (let k = 0; k <= m; k++) {
-          const y = lo + (hi - lo) * k / m;
-          let d = 0; for (const x of s) d += Math.exp(-0.5 * ((y - x) / bw) ** 2);
-          ys.push(Math.min(yr[1], Math.max(yr[0], y))); ds.push(d);
-        }
-        const dmax = Math.max(...ds), half = w * 0.42;
-        const pts = ys.map((y, k) => `${(c + 2 + ds[k] / dmax * half).toFixed(1)},${f.sy(y).toFixed(1)}`);
-        b += `<path d="M${c + 2},${f.sy(ys[0]).toFixed(1)} L${pts.join(' L')} L${c + 2},${f.sy(ys[m]).toFixed(1)} Z" style="fill:${col};fill-opacity:.35;stroke:${col}" stroke-width="1.2"/>`;
+      const s = S.sorted(v);
+      const cl = clouds[gi];
+      if (cl) {
+        const dmax = Math.max(...cl.ds), half = w * 0.42, m = cl.ys.length - 1;
+        const pts = cl.ys.map((y, k) => `${(c + 2 + cl.ds[k] / dmax * half).toFixed(1)},${f.sy(y).toFixed(1)}`);
+        b += `<path d="M${c + 2},${f.sy(cl.ys[0]).toFixed(1)} L${pts.join(' L')} L${c + 2},${f.sy(cl.ys[m]).toFixed(1)} Z" style="fill:${col};fill-opacity:.35;stroke:${col}" stroke-width="1.2"/>`;
       }
       // 箱ひげ図（細め）
       const q1 = S.quantile(s, 0.25, true), md = S.quantile(s, 0.5, true), q3 = S.quantile(s, 0.75, true), iq = q3 - q1;

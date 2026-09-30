@@ -125,7 +125,7 @@
         }
       }
       out.push(table('記述統計', cols, rows, clean([
-        modeTie ? '最頻値が複数ある場合は最小の値を示しています。' : null,
+        o.mode && modeTie ? '最頻値が複数ある場合は最小の値を示しています。' : null,
         o.skew || o.kurt ? '歪度・尖度は標本サイズで補正した推定量（SPSS と同じ定義）です。' : null,
         o.quartiles ? '四分位数は R の type 7（Excel の QUARTILE.INC と同じ）で計算しています。' : null,
         '名義尺度の変数は有効・欠損の数だけを示します。'])));
