@@ -142,6 +142,10 @@ lo, hi = it.to_numpy().min(), it.to_numpy().max(); it["満足度3"] = lo + hi - 
 kk = it.shape[1]; alpha = kk / (kk - 1) * (1 - it.var().sum() / it.sum(axis=1).var())
 chk("alpha", J["rel"]["尺度の信頼性"][0]["a"], alpha)
 rest = it.sum(axis=1) - it["満足度1"]; chk("item-rest r", J["rel"]["項目ごとの統計量"][0]["rir"], np.corrcoef(it["満足度1"], rest)[0, 1])
+# 合計得点の平均・標準偏差（ω を足したときにこの行を消してしまい、本の照合で見つかった）
+chk("合計の平均値", J["rel"]["尺度の信頼性"][0]["m"], it.sum(axis=1).mean()); chk("合計の標準偏差", J["rel"]["尺度の信頼性"][0]["sd"], it.sum(axis=1).std())
+Rm = it.corr().to_numpy(); kk = 4; rb = (Rm.sum() - kk) / (kk * (kk - 1))
+chk("項目間相関の平均", J["rel"]["尺度の信頼性"][0]["r"], rb); chk("標準化 α", J["rel"]["尺度の信頼性"][0]["s"], kk * rb / (1 + (kk - 1) * rb))
 
 # ---------------------------------------------------------------- ベイズファクター
 # 参照値は ref_bayes.py の関数（stats.js とは別の積分方法）で求める

@@ -1421,6 +1421,7 @@
       const row = { a: alpha(items) };
       if (o.std) { sc.push({ key: 's', label: '標準化 α' }); row.s = k * rbar / (1 + (k - 1) * rbar); }
       if (o.meanr) { sc.push({ key: 'r', label: '項目間相関の平均' }); row.r = rbar; }
+      if (o.scaleStats) { sc.push({ key: 'm', label: '合計の平均値' }, { key: 'sd', label: '合計の標準偏差' }); row.m = S.mean(total); row.sd = S.sd(total); }
       // McDonald の ω：1因子モデルを最尤法であてはめ、(Σλ)² / ((Σλ)² + ΣΨ)
       const useOmega = (o.omega || o.loadings || o.omegaCI) && k >= 3;
       const covML = its => its.map(a => { const ma = S.mean(a); return its.map(b => { const mb = S.mean(b); let s = 0; for (let r = 0; r < a.length; r++) s += (a[r] - ma) * (b[r] - mb); return s / a.length; }); });
