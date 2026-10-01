@@ -59,5 +59,33 @@ out.ctBF = run('contingency', { rows: ['性別'], cols: ['合格'] }, { bf: true
 out.ct3BF = run('contingency', { rows: ['学級'], cols: ['合格'] }, { bf: true, bfPrior: 2 });
 out.binomBF = run('binomial', { vars: ['合格'] }, { p0: 0.6, bf: true });
 out.binomBFg = run('binomial', { vars: ['合格'] }, { p0: 0.6, bf: true, alt: 'greater' });
+// 反復測定の分散分析（2要因）
+// 混合計画：サンプルの 指導法 × 時点（事前・事後・3か月後）
+out.mixed = timed('混合計画', () => run('rmanova2', { cells: ['事前テスト', '事後テスト', '3か月後'], between: ['指導法'] },
+  { w1name: '時点', mauchly: true, gg: true, hf: true, peta: true, desc: true, posthoc: true, phBonf: true, phTukey: true, plot: true, rain: true }));
+out.mixedBF = timed('混合計画 BF', () => run('rmanova2', { cells: ['事前テスト', '事後テスト', '3か月後'], between: ['指導法'] }, { w1name: '時点', bf: true }));
+out.mixed3 = run('rmanova2', { cells: ['事前テスト', '事後テスト', '3か月後'], between: ['学級'] }, { w1name: '時点', w1levels: '事前, 事後, 3か月後', gg: true, posthoc: true, phTukey: true });
+// 被験者内×被験者内：tests/rm2_data.csv（2 × 3）
+{
+  const ds2 = D.parseText(fs.readFileSync(path.join(__dirname, 'rm2_data.csv'), 'utf8'), 'rm2');
+  const run2 = (id, sel, opt) => {
+    const def = A.find(a => a.id === id), o = {}, s = {};
+    for (const op of def.options) if (op.key) o[op.key] = op.def;
+    for (const sl of def.slots) s[sl.key] = [];
+    const blocks = def.run(ds2, Object.assign(s, sel), Object.assign(o, opt));
+    for (const b of blocks) if (b.type === 'error') throw new Error(`${id}: ${b.text}`);
+    for (const b of blocks) if (b.type === 'plot' && !/^<svg[\s\S]*<\/svg>$/.test(b.svg)) throw new Error(`${id}: 図が空`);
+    return Object.fromEntries(blocks.filter(b => b.type === 'table').map(b => [b.title, b.rows]));
+  };
+  const cells = ['A1B1', 'A1B2', 'A1B3', 'A2B1', 'A2B2', 'A2B3'];
+  out.ww = timed('被験者内×被験者内', () => run2('rmanova2', { cells }, { w1name: 'A', w2name: 'B', w2levels: '3', mauchly: true, gg: true, hf: true, peta: true, desc: true, posthoc: true, phBonf: true, plot: true, rain: true }));
+  out.wwBF = timed('被験者内×被験者内 BF', () => run2('rmanova2', { cells }, { w1name: 'A', w2name: 'B', w2levels: 'B1, B2, B3', bf: true }));
+  // 1要因（混合でも被験者内×被験者内でもない）は案内だけを出し、エラーにしない
+  const def = A.find(a => a.id === 'rmanova2'); const o = {}; for (const op of def.options) if (op.key) o[op.key] = op.def;
+  const msg = def.run(ds2, { cells, between: [] }, o);
+  if (!(msg.length === 1 && msg[0].type === 'note')) throw new Error('rmanova2: 1要因の案内が出ない');
+  // 1要因の既存の分析と、要因2を「混合計画の群が1つもない形」にできないので、同じ F を別経路で比べる
+  out.ww1 = run2('rmanova', { vars: ['A1B1', 'A1B2', 'A1B3'] }, { gg: true });
+}
 fs.writeFileSync(process.argv[2], JSON.stringify(out, (k, v) => (typeof v === 'number' && !isFinite(v) ? String(v) : v), 1));
 console.log('分析を実行しました:', Object.keys(out).length, '件');

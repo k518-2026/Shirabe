@@ -687,6 +687,111 @@
     return logSumExp(out);
   };
 
+  // 対数の被積分関数 f(τ)（τ = log g のベクトル）を格子で積分し、log ∫ exp(f) dτ を返す。
+  // まず座標ごとの黄金分割で最大点を探し、各軸の切り口から積分範囲（最大値から 32 以内）と
+  // 刻み（最大点の曲率から求めた広がりの 0.9 倍以下）を決めて、台形則で積分する
+  S.integrateLog = function (f, start, lo, hi, maxPts) {
+    // 上限で格子を間引くと精度が落ちる（40万点で 0.2% ずれた）ので、上限は余裕をもって大きくとる
+    maxPts = maxPts || 2000000;
+    const d = start.length, x = start.slice();
+    const along = (j, t) => { const y = x.slice(); y[j] = t; return f(y); };
+    for (let pass = 0; pass < 3; pass++) {
+      for (let j = 0; j < d; j++) {
+        let a = lo[j], b = hi[j];
+        const gr = (Math.sqrt(5) - 1) / 2;
+        let c = b - gr * (b - a), e = a + gr * (b - a), fc = along(j, c), fe = along(j, e);
+        for (let it = 0; it < 40; it++) {
+          if (fc > fe) { b = e; e = c; fe = fc; c = b - gr * (b - a); fc = along(j, c); }
+          else { a = c; c = e; fc = fe; e = a + gr * (b - a); fe = along(j, e); }
+        }
+        x[j] = (a + b) / 2;
+      }
+    }
+    const fmax = f(x), axes = [];
+    for (let j = 0; j < d; j++) {
+      // 範囲：切り口が fmax − 32 を下回らない区間（両側に 1.5 の余裕）
+      const m = 160, step = (hi[j] - lo[j]) / m;
+      let a = x[j], b = x[j];
+      for (let i = 0; i <= m; i++) { const t = lo[j] + i * step; if (along(j, t) >= fmax - 32) { a = Math.min(a, t); b = Math.max(b, t); } }
+      a = Math.max(lo[j], a - 1.5); b = Math.min(hi[j], b + 1.5);
+      // 刻み：最大点での2階差分から広がり sd を見積もる
+      const dl = 0.05, f2 = (along(j, x[j] + dl) + along(j, x[j] - dl) - 2 * fmax) / (dl * dl);
+      const sd = f2 < -1e-8 ? 1 / Math.sqrt(-f2) : 5;
+      // 刻みは広がりの 0.6 倍（4次元で 1.2 倍にすると 0.08%、0.9 倍で 6e-5 ずれた。0.6 倍と 0.45 倍は同じ値）
+      const h = Math.min(1.2, Math.max(0.02, 0.6 * sd));
+      axes.push({ a, b, n: Math.min(120, Math.ceil((b - a) / h) + 1) });
+    }
+    let total = axes.reduce((p, ax) => p * ax.n, 1);
+    if (total > maxPts) { const s = Math.pow(maxPts / total, 1 / d); axes.forEach(ax => { ax.n = Math.max(12, Math.floor(ax.n * s)); }); }
+    axes.forEach(ax => { ax.h = ax.n > 1 ? (ax.b - ax.a) / (ax.n - 1) : 1; });
+    const idx = new Array(d).fill(0), y = new Array(d);
+    let sum = 0;
+    for (;;) {
+      let w = 1;
+      for (let j = 0; j < d; j++) {
+        y[j] = axes[j].a + idx[j] * axes[j].h;
+        if (idx[j] === 0 || idx[j] === axes[j].n - 1) w *= 0.5;
+      }
+      sum += w * Math.exp(f(y) - fmax);
+      let j = 0;
+      while (j < d && ++idx[j] === axes[j].n) { idx[j] = 0; j++; }
+      if (j === d) break;
+    }
+    return fmax + Math.log(sum) + axes.reduce((s, ax) => s + Math.log(ax.h), 0);
+  };
+  // IG(1/2, b) の τ = log g での対数密度
+  const lpriorTau = (tau, b) => 0.5 * Math.log(b / Math.PI) - tau / 2 - b * Math.exp(-tau);
+
+  // 反復測定の計画（欠損なし、1人 k 個の測定値）で、被験者の変量効果（幅 rS）＋固定効果のモデルの
+  // 切片だけのモデルに対する log BF（Rouder et al., 2012）。被験者の列は、
+  // 中心化した固定効果の列・従属変数と直交する成分だけが効くので、シューア補行列で行列を小さくできる。
+  // X: 中心化した固定効果の計画行列（N × p, p は 0 でもよい）、y: 中心化した従属変数、subj: 行ごとの被験者番号
+  S.logBfRMModel = function (X, y, subj, n, k, blocks, rS, maxPts) {
+    rS = rS || 1;
+    const N = y.length, p = X.length ? X[0].length : 0;
+    const Sy = new Array(n).fill(0), SX = Array.from({ length: n }, () => new Array(p).fill(0));
+    let yty = 0;
+    const XtX = Array.from({ length: p }, () => new Array(p).fill(0)), Xty = new Array(p).fill(0);
+    for (let i = 0; i < N; i++) {
+      const s = subj[i]; Sy[s] += y[i]; yty += y[i] * y[i];
+      for (let a = 0; a < p; a++) {
+        SX[s][a] += X[i][a]; Xty[a] += X[i][a] * y[i];
+        for (let c = a; c < p; c++) XtX[a][c] += X[i][a] * X[i][c];
+      }
+    }
+    for (let a = 0; a < p; a++) for (let c = 0; c < a; c++) XtX[a][c] = XtX[c][a];
+    const aa = S.sum(Sy.map(v => v * v));
+    const SXtSX = Array.from({ length: p }, (_, a) => Array.from({ length: p }, (_, c) => { let s = 0; for (let i = 0; i < n; i++) s += SX[i][a] * SX[i][c]; return s; }));
+    const SXtSy = Array.from({ length: p }, (_, a) => { let s = 0; for (let i = 0; i < n; i++) s += SX[i][a] * Sy[i]; return s; });
+    const colBlock = new Array(p).fill(0);
+    blocks.forEach((bl, j) => bl.cols.forEach(c => { colBlock[c] = j; }));
+    const bs = [rS * rS / 2, ...blocks.map(bl => bl.r * bl.r / 2)];
+    const M = Array.from({ length: p }, () => new Array(p).fill(0)), L = Array.from({ length: p }, () => new Array(p).fill(0)), z = new Array(p), w = new Array(p);
+    const f = tau => {
+      const gs = Math.exp(tau[0]), c = gs / (1 + k * gs);
+      let lp = 0;
+      for (let j = 0; j < tau.length; j++) lp += lpriorTau(tau[j], bs[j]); // τ での密度（ヤコビアン込み）
+      let ld = (n - 1) * Math.log1p(k * gs), quad = c * aa;
+      for (let j = 0; j < blocks.length; j++) ld += tau[j + 1] * blocks[j].cols.length;
+      for (let a = 0; a < p; a++) {
+        w[a] = Xty[a] - c * SXtSy[a];
+        for (let b = 0; b < p; b++) M[a][b] = XtX[a][b] - c * SXtSX[a][b] + (a === b ? Math.exp(-tau[colBlock[a] + 1]) : 0);
+      }
+      for (let a = 0; a < p; a++) {
+        for (let b = 0; b <= a; b++) {
+          let s = M[a][b];
+          for (let q = 0; q < b; q++) s -= L[a][q] * L[b][q];
+          if (a === b) { if (s <= 0) return -Infinity; L[a][a] = Math.sqrt(s); ld += 2 * Math.log(L[a][a]); }
+          else L[a][b] = s / L[b][b];
+        }
+      }
+      for (let a = 0; a < p; a++) { let s = w[a]; for (let q = 0; q < a; q++) s -= L[a][q] * z[q]; z[a] = s / L[a][a]; quad += z[a] * z[a]; }
+      return lp - 0.5 * ld - (N - 1) / 2 * Math.log(Math.max(1e-300, 1 - quad / yty));
+    };
+    const start = bs.map(b => Math.log(2 * b)), lo = bs.map(b => Math.log(b) - 7), hi = bs.map(b => Math.log(b) + 25);
+    return S.integrateLog(f, start, lo, hi, maxPts);
+  };
+
   // 1要因の反復測定：被験者（変量, r = 1）＋条件（固定, r = 0.5）のモデルと被験者だけのモデルの比。
   // 欠損のないデータでは被験者と条件の列が直交するので、行列を使わずに閉じた式で書ける
   S.bfRM = function (n, k, ssSubj, ssCond, ssTot, rFixed, rRandom) {

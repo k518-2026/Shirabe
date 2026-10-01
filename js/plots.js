@@ -236,8 +236,11 @@
       void gi;
     });
     if (opt.paired) {
-      for (let a = 0; a + 1 < pos.length; a++) {
-        const A = pos[a], B = pos[a + 1];
+      // 同じ系列の隣り合う水準（x と x+1）をつなぐ。値の配列は同じ位置が同じ人
+      for (let a = 0; a < pos.length; a++) {
+        const nb = groups.findIndex(g => g.s === groups[a].s && g.x === groups[a].x + 1);
+        if (nb < 0) continue;
+        const A = pos[a], B = pos[nb];
         for (let k = 0; k < Math.min(A.length, B.length); k++) b += `<line x1="${A[k][0].toFixed(1)}" y1="${A[k][1].toFixed(1)}" x2="${B[k][0].toFixed(1)}" y2="${B[k][1].toFixed(1)}" class="pairline"/>`;
       }
     }

@@ -743,6 +743,291 @@
     },
   });
 
+  // 重いベイズファクターの計算結果の置き場（データセットごと。新しいデータを読むと自然に捨てられる）
+  const bfCache = new WeakMap();
+  const bfCacheGet = (ds, key) => (bfCache.get(ds) || new Map()).get(key);
+  const bfCacheSet = (ds, key, v) => { if (!bfCache.has(ds)) bfCache.set(ds, new Map()); bfCache.get(ds).set(key, v); };
+
+  // ------------------------------------------------------------ 反復測定の分散分析（2要因）
+  // 被験者内×被験者内、または被験者間×被験者内（混合計画）。
+  // 被験者ごとに対比得点 Z = Y·C をつくり、被験者間の計画行列（効果コーディング）に多変量回帰して、
+  // 仮説と誤差の平方和積和行列の対角和から平方和を求める（Type III。R の car・afex と同じ考え方）
+  const parseLevels = (s, fallback) => {
+    const t = String(s === undefined || s === null ? '' : s).trim();
+    if (!t) return fallback;
+    if (/^\d+$/.test(t)) return Array.from({ length: +t }, (_, i) => String(i + 1));
+    return t.split(/[,、，]/).map(v => v.trim()).filter(Boolean);
+  };
+  const kron = (u, v) => u.flatMap(a => v.map(b => a * b));
+  // 被験者内の効果の対比（列ベクトルの配列、各長さ k）。効果に含む要因は Helmert 型、含まない要因は 1/√l
+  function withinContrast(levelsN, inEffect) {
+    let cols = [[1]];
+    levelsN.forEach((l, f) => {
+      const Q = helmertQ(l);
+      const parts = inEffect.includes(f) ? Q[0].map((_, j) => Q.map(r => r[j])) : [new Array(l).fill(1 / Math.sqrt(l))];
+      cols = cols.flatMap(c => parts.map(p => kron(c, p)));
+    });
+    return cols;
+  }
+  // Z（n × p）を X（n × q）に回帰したときの残差の平方和積和行列（q = 0 なら Z'Z）
+  function residSSP(Z, X) {
+    const n = Z.length, p = Z[0].length, q = X[0] ? X[0].length : 0;
+    let R = Z;
+    if (q) {
+      const Xt = S.transpose(X), inv = S.inverse(S.matmul(Xt, X));
+      if (!inv) return null;
+      const B = S.matmul(inv, S.matmul(Xt, Z));
+      R = Z.map((z, i) => z.map((v, j) => { let s = v; for (let a = 0; a < q; a++) s -= X[i][a] * B[a][j]; return s; }));
+    }
+    return Array.from({ length: p }, (_, a) => Array.from({ length: p }, (_, b) => { let s = 0; for (let i = 0; i < n; i++) s += R[i][a] * R[i][b]; return s; }));
+  }
+  // 1つの層（対比 C）について、切片（＝被験者内の効果そのもの）と群の効果の平方和、誤差の平方和
+  function rmStratum(Y, C, XB, termsB) {
+    const Z = Y.map(row => C.map(c => { let s = 0; for (let j = 0; j < c.length; j++) s += c[j] * row[j]; return s; }));
+    const E = residSSP(Z, XB);
+    const tr = M => M.reduce((s, r, i) => s + r[i], 0);
+    const tests = termsB.map(t => {
+      const keep = XB[0].map((_, j) => j).filter(j => !t.cols.includes(j));
+      const Ered = residSSP(Z, XB.map(r => keep.map(j => r[j])));
+      return { key: t.key, ss: tr(Ered) - tr(E), df: C.length * t.cols.length };
+    });
+    return { tests, sse: tr(E), E, p: C.length };
+  }
+  // 球面性：Mauchly の W、Greenhouse-Geisser と Huynh-Feldt（Lecoutre の補正）の ε
+  function sphericity(E, p, dfE) {
+    const tr = E.reduce((s, r, i) => s + r[i], 0);
+    let tr2 = 0; for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) tr2 += E[i][j] * E[j][i];
+    const gg = tr * tr / (p * tr2);
+    const hf = Math.min(1, ((dfE + 1) * p * gg - 2) / (p * (dfE - p * gg)));
+    const W = S.det(E) / Math.pow(tr / p, p);
+    const chi = -(dfE - (2 * p * p + p + 2) / (6 * p)) * Math.log(W), df = p * (p + 1) / 2 - 1;
+    return { W, chi, df, p: S.pchisqUpper(chi, df), gg, hf };
+  }
+
+  A.push({
+    id: 'rmanova2', group: '分散分析', title: '反復測定の分散分析（2要因）',
+    slots: [
+      { key: 'cells', label: '測定値の列（セルの順に）', multi: true, types: ['scale', 'ordinal'] },
+      { key: 'between', label: '被験者間の要因（混合計画のとき）', multi: false, types: ['nominal', 'ordinal'], optional: true },
+    ],
+    options: [
+      { type: 'heading', label: '被験者内の要因' },
+      { type: 'text', key: 'w1name', label: '要因1の名前', def: '要因1' },
+      { type: 'text', key: 'w1levels', label: '要因1の水準（カンマ区切り、または水準の数）', def: '', placeholder: '例: 事前, 事後, 3か月後',
+        hint: '空欄なら、要因2がないときは列名を水準名にします。' },
+      { type: 'text', key: 'w2name', label: '要因2の名前', def: '要因2' },
+      { type: 'text', key: 'w2levels', label: '要因2の水準（被験者内×被験者内のとき）', def: '', placeholder: '例: 課題A, 課題B',
+        hint: '被験者内×被験者内では、列を「要因1の水準ごとに要因2の水準を順に」並べます（A1B1, A1B2, A2B1, A2B2 …）。混合計画では空欄にして、被験者間の要因を入れます。' },
+      { type: 'heading', label: '球面性' },
+      { type: 'check', key: 'mauchly', label: 'Mauchly の球面性検定', def: false },
+      { type: 'check', key: 'gg', label: 'Greenhouse-Geisser の補正', def: false },
+      { type: 'check', key: 'hf', label: 'Huynh-Feldt の補正', def: false },
+      { type: 'heading', label: '効果量' },
+      { type: 'check', key: 'eta', label: 'η²', def: true },
+      { type: 'check', key: 'peta', label: '偏 η²', def: false },
+      { type: 'heading', label: '表示' },
+      { type: 'check', key: 'cellmap', label: '列とセルの対応', def: true },
+      { type: 'check', key: 'desc', label: 'セルごとの記述統計', def: false },
+      { type: 'heading', label: '事後検定（各要因の水準間）' },
+      { type: 'check', key: 'posthoc', label: '事後検定を行う', def: false },
+      { type: 'check', key: 'phHolm', label: 'Holm', def: true },
+      { type: 'check', key: 'phBonf', label: 'Bonferroni', def: false },
+      { type: 'check', key: 'phTukey', label: 'Tukey（被験者間の要因）', def: false },
+      ...bayesOptions('事前分布の幅（固定効果の r）', 0.5),
+      { type: 'heading', label: '図' },
+      { type: 'check', key: 'plot', label: '平均値と信頼区間の図', def: false },
+      { type: 'check', key: 'rain', label: '雨雲プロット', def: false },
+      { type: 'number', key: 'ciLevel', label: '信頼水準 %', def: 95, min: 50, max: 99.9, step: 0.1 },
+    ],
+    run(ds, sel, o) {
+      if (!sel.cells.length) return [];
+      const cs = sel.cells.map(n => col(ds, n)), bc = sel.between[0] ? col(ds, sel.between[0]) : null;
+      const k = cs.length;
+      const w1 = String(o.w1name || '').trim() || '要因1', w2 = String(o.w2name || '').trim() || '要因2';
+      const L2 = parseLevels(o.w2levels, []);
+      if (L2.length && bc) return [err('被験者内の要因が2つで被験者間の要因もあると3要因になります。2要因までに対応しています（要因2の水準を空欄にするか、被験者間の要因を外してください）。')];
+      if (!L2.length && !bc) return [note('2要因にするには、「要因2の水準」を入れる（被験者内×被験者内）か、被験者間の要因を入れてください（混合計画）。被験者内の要因が1つだけなら「反復測定の分散分析（1要因）」を使えます。')];
+      if (L2.length === 1) return [err('要因2の水準は2つ以上にしてください。')];
+      const L1 = parseLevels(o.w1levels, L2.length ? (k % L2.length ? [] : Array.from({ length: k / L2.length }, (_, i) => String(i + 1))) : sel.cells.slice());
+      if (L1.length < 2) return [err(`要因1の水準は2つ以上にしてください。${L2.length && k % L2.length ? `列の数（${k}）が要因2の水準数（${L2.length}）で割り切れません。` : ''}`)];
+      const wl = L2.length ? [L1.length, L2.length] : [L1.length];
+      if (wl.reduce((a, b) => a * b, 1) !== k) return [err(`列の数（${k}）が水準の組み合わせの数（${wl.join(' × ')} = ${wl.reduce((a, b) => a * b, 1)}）と合いません。`)];
+      const idx = D.complete(ds, bc ? [...cs, bc] : cs);
+      const glev = bc ? levelsIn(bc, idx) : null, G = glev ? glev.length : 1;
+      if (bc && G < 2) return [err('被験者間の要因に2つ以上の水準が必要です。')];
+      // 群ごとに並べ替えておく（図の対応線と事後検定のため）
+      const order = bc ? glev.flatMap(l => idx.filter(i => bc.raw[i] === l)) : idx;
+      const Y = order.map(i => cs.map(c => c.nums[i]));
+      const grp = bc ? order.map(i => glev.indexOf(bc.raw[i])) : null;
+      const n = Y.length, out = [];
+      const XB = Y.map((_, i) => [1, ...(bc ? effectCodes(glev, glev[grp[i]]) : [])]);
+      const termsB = [{ key: 'int', cols: [0] }];
+      if (bc) termsB.push({ key: 'grp', cols: glev.slice(1).map((_, j) => j + 1) });
+      const dfE = n - XB[0].length;
+      if (dfE < 1 || (bc && glev.some((l, g) => grp.filter(v => v === g).length < 1))) return [err('被験者が少なすぎます。')];
+      if (dfE < 2) return [err('誤差の自由度が足りません。被験者を増やしてください。')];
+      const all = Y.flat(), gm = S.mean(all);
+      let sst = 0; for (const v of all) sst += (v - gm) ** 2;
+      // 被験者内の効果
+      const wNames = L2.length ? [w1, w2, `${w1} ✻ ${w2}`] : [w1];
+      const effSets = L2.length ? [[0], [1], [0, 1]] : [[0]];
+      const bname = bc ? bc.name : null;
+      const rows = [], sph = [];
+      const bfRowOf = {};
+      effSets.forEach((set, e) => {
+        const st = rmStratum(Y, withinContrast(wl, set), XB, termsB);
+        const dfe = st.p * dfE, mse = st.sse / dfe;
+        const sp = st.p >= 2 ? sphericity(st.E, st.p, dfE) : null;
+        if (sp) sph.push({ term: wNames[e], ...sp });
+        const corrs = [['なし', 1]];
+        if (sp && o.gg) corrs.push(['Greenhouse-Geisser', sp.gg]);
+        if (sp && o.hf) corrs.push(['Huynh-Feldt', sp.hf]);
+        st.tests.forEach(t => {
+          const name = t.key === 'int' ? wNames[e] : `${wNames[e]} ✻ ${bname}`;
+          const F = (t.ss / t.df) / mse;
+          corrs.forEach(([cl, eps], ci) => {
+            const r = { term: ci === 0 ? name : '', corr: cl, ss: t.ss, df: t.df * eps, ms: t.ss / (t.df * eps), F, p: S.pfUpper(F, t.df * eps, dfe * eps),
+              eta: t.ss / sst, peta: t.ss / (t.ss + st.sse), _sep: ci === 0 && rows.length > 0 };
+            rows.push(r);
+            if (ci === 0) bfRowOf[t.key === 'int' ? `w${e}` : `wg${e}`] = r;
+          });
+        });
+        corrs.forEach(([cl, eps], ci) => rows.push({ term: ci === 0 ? '残差' : '', corr: cl, ss: st.sse, df: dfe * eps, ms: st.sse / (dfe * eps) }));
+      });
+      // 被験者間の効果（被験者ごとの平均の層）
+      const st0 = rmStratum(Y, [new Array(k).fill(1 / Math.sqrt(k))], XB, termsB);
+      const brows = [];
+      if (bc) {
+        const t = st0.tests.find(q => q.key === 'grp'), F = (t.ss / t.df) / (st0.sse / dfE);
+        brows.push({ term: bname, ss: t.ss, df: t.df, ms: t.ss / t.df, F, p: S.pfUpper(F, t.df, dfE), eta: t.ss / sst, peta: t.ss / (t.ss + st0.sse) });
+        bfRowOf.g = brows[0];
+      }
+      brows.push({ term: '残差', ss: st0.sse, df: dfE, ms: st0.sse / dfE });
+
+      // ベイズファクター（被験者は変量効果。H₀ は被験者の効果だけのモデル）
+      let bfTables = [], bfN = null;
+      if (o.bf) {
+        const r = priorOf(o, 0.5);
+        const lev = wl.map(l => helmertQ(l)), Qg = bc ? helmertQ(G) : null;
+        const cellLevels = c => (L2.length ? [Math.floor(c / wl[1]), c % wl[1]] : [c]);
+        const yl = [], subj = [], Xl = [];
+        Y.forEach((row, i) => row.forEach((v, c) => {
+          const lv = cellLevels(c);
+          let x;
+          if (L2.length) { const a = lev[0][lv[0]], b = lev[1][lv[1]]; x = [a, b, kron(a, b)]; }
+          else { const g = Qg[grp[i]], w = lev[0][lv[0]]; x = [g, w, kron(w, g)]; }
+          yl.push(v); subj.push(i); Xl.push(x);
+        }));
+        const blockNames = L2.length ? [w1, w2, `${w1} ✻ ${w2}`] : [bname, w1, `${w1} ✻ ${bname}`];
+        const blockKeys = L2.length ? ['w0', 'w1', 'w2'] : ['g', 'w0', 'wg0'];
+        const yc = yl.map(v => v - gm);
+        const sets = [[], [0], [1], [0, 1], [0, 1, 2]];
+        // 4次元の積分は1秒近くかかるので、結果に効く入力（データ・列・要因・事前分布）が同じなら使い回す
+        const cacheKey = JSON.stringify([sel.cells, sel.between, wl, r, n, S.sum(yl)]);
+        let lbfs = bfCacheGet(ds, cacheKey);
+        if (!lbfs) {
+          const lNull = S.logBfRMModel([], yc, subj, n, k, [], 1);
+          lbfs = sets.map(set => {
+            if (!set.length) return 0;
+            const X = centerCols(Xl.map(x => set.flatMap(j => x[j])));
+            let off = 0;
+            const blocks = set.map(j => { const len = Xl[0][j].length, bl = { cols: Array.from({ length: len }, (_, q) => off + q), r }; off += len; return bl; });
+            return S.logBfRMModel(X, yc, subj, n, k, blocks, 1) - lNull;
+          });
+          bfCacheSet(ds, cacheKey, lbfs);
+        }
+        const models = sets.map((set, q) => ({ set, name: set.length ? set.map(j => blockNames[j]).join(' + ') : '帰無モデル（被験者だけ）', lbf: lbfs[q] }));
+        const lz = S.logSumExp(models.map(m => m.lbf)), pm = 1 / models.length;
+        const mrows = models.map(m => {
+          const post = Math.exp(m.lbf - lz);
+          const row = { model: m.name, prior: pm, post, bfm: post / (1 - post) / (pm / (1 - pm)), ...bfCells(Math.exp(m.lbf), o) };
+          if (!m.set.length) row.ev = '（比較の基準）';
+          return row;
+        });
+        blockKeys.forEach((key, j) => {
+          const inc = models.filter(m => m.set.includes(j)), exc = models.filter(m => !m.set.includes(j));
+          const bfi = S.sum(inc.map(m => Math.exp(m.lbf - lz))) / S.sum(exc.map(m => Math.exp(m.lbf - lz))) / (inc.length / exc.length);
+          if (bfRowOf[key]) Object.assign(bfRowOf[key], { bf: bfShow(bfi, o), ev: bfEvidence(bfi) });
+        });
+        bfN = bfNote(o, `固定効果に JZS 事前分布（幅 r = ${r}）、被験者の効果は変量（幅 1）。どのモデルにも被験者の効果を含み、H₀ は被験者の効果だけのモデル（Rouder et al., 2012）`);
+        bfTables.push(table('ベイズファクター（モデル比較）', [{ key: 'model', label: 'モデル', fmt: 'text' }, { key: 'prior', label: 'P(M)' }, { key: 'post', label: 'P(M | データ)' },
+          { key: 'bfm', label: 'BF_M' }, { key: 'bf', label: bfLabel(o) + '（帰無モデルと比較）' }, { key: 'ev', label: '証拠の強さ', fmt: 'text' }], mrows,
+        ['どのモデルも事前確率は等しいとしています。主表の「BF包含」は、その効果を含むモデル全体と含まないモデル全体を比べたベイズファクターです。', bfN]));
+      }
+      const bfC = o.bf ? [{ key: 'bf', label: o.bfType === 'bf01' ? 'BF₀₁（包含）' : o.bfType === 'log' ? 'log(BF包含)' : 'BF包含' }, { key: 'ev', label: '証拠の強さ', fmt: 'text' }] : [];
+      const esC = [...(o.eta ? [{ key: 'eta', label: 'η²' }] : []), ...(o.peta ? [{ key: 'peta', label: '偏 η²' }] : [])];
+      out.push(table('被験者内効果', [{ key: 'term', label: '要因', fmt: 'text' }, { key: 'corr', label: '球面性の補正', fmt: 'text' }, { key: 'ss', label: '平方和' }, { key: 'df', label: '自由度', fmt: 'df' },
+        { key: 'ms', label: '平均平方' }, { key: 'F', label: 'F' }, { key: 'p', label: 'p', fmt: 'p' }, ...esC, ...bfC], rows,
+      clean(['平方和は Type III です。', excluded(ds, idx), o.eta ? 'η² の分母は全平方和です。' : null,
+        (o.gg || o.hf) && sph.length < effSets.length ? '水準が2つの効果は球面性の補正が要らないので「なし」だけを示します。' : null])));
+      out.push(table('被験者間効果', [{ key: 'term', label: '要因', fmt: 'text' }, { key: 'ss', label: '平方和' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'ms', label: '平均平方' },
+        { key: 'F', label: 'F' }, { key: 'p', label: 'p', fmt: 'p' }, ...esC, ...bfC], brows));
+      out.push(...bfTables);
+      if (o.mauchly) {
+        if (!sph.length) out.push(note('どの被験者内の効果も水準が2つなので、球面性の仮定は常に満たされます。'));
+        else out.push(table('球面性の検定', [{ key: 'term', label: '', fmt: 'text' }, { key: 'W', label: 'Mauchly の W' }, { key: 'chi', label: 'χ²' }, { key: 'df', label: '自由度', fmt: 'df' },
+          { key: 'p', label: 'p', fmt: 'p' }, { key: 'gg', label: 'GG ε' }, { key: 'hf', label: 'HF ε' }], sph));
+      }
+      // セル（図・記述統計・列の対応）
+      const lv = level(o), series = L2.length ? L2 : glev;
+      const cellList = [];
+      L1.forEach((a, i1) => series.forEach((s, j) => {
+        const c = L2.length ? i1 * wl[1] + j : i1;
+        const v = (L2.length ? Y : Y.filter((_, i) => grp[i] === j)).map(r => r[c]);
+        const [lo, hi] = meanCI(v, lv);
+        cellList.push({ f1: a, f2: s, col: sel.cells[c], n: v.length, mean: S.mean(v), sd: S.sd(v), se: S.sd(v) / Math.sqrt(v.length), lo, hi, x: i1, s: j, v });
+      }));
+      if (o.cellmap) {
+        const map = L2.length ? cellList.map(c => ({ f1: c.f1, f2: c.f2, col: c.col })) : L1.map((a, i1) => ({ f1: a, col: sel.cells[i1] }));
+        out.push(table('列とセルの対応', [{ key: 'f1', label: w1, fmt: 'text' }, ...(L2.length ? [{ key: 'f2', label: w2, fmt: 'text' }] : []), { key: 'col', label: '列', fmt: 'text' }], map,
+          ['意図した対応になっているか確かめてください。違っていたら列を入れる順か水準の指定を直します。']));
+      }
+      if (o.desc) out.push(table('セルごとの記述統計', [{ key: 'f1', label: w1, fmt: 'text' }, { key: 'f2', label: L2.length ? w2 : bname, fmt: 'text' }, { key: 'n', label: 'N', fmt: 'int' },
+        { key: 'mean', label: '平均値' }, { key: 'sd', label: '標準偏差' }, { key: 'se', label: '標準誤差' }], cellList));
+      if (o.posthoc) {
+        // 被験者内の要因：各被験者の周辺平均（もう一方の要因の水準で平均）を対応のある t 検定で比べる
+        wl.forEach((l, f) => {
+          const levelsF = f === 0 ? L1 : L2;
+          const M = Y.map(row => levelsF.map((_, a) => {
+            const cells = row.filter((_, c) => (L2.length ? (f === 0 ? Math.floor(c / wl[1]) : c % wl[1]) : c) === a);
+            return S.mean(cells);
+          }));
+          const comps = [];
+          for (let a = 0; a < l; a++) for (let b = a + 1; b < l; b++) {
+            const d = M.map(r => r[a] - r[b]), md = S.mean(d), se = S.sd(d) / Math.sqrt(n), t = md / se;
+            comps.push({ a: levelsF[a], b: levelsF[b], md, se, t, df: n - 1, p: S.ptTwo(t, n - 1) });
+          }
+          const ps = comps.map(c => c.p), holm = S.adjust(ps, 'holm'), bonf = S.adjust(ps, 'bonferroni');
+          comps.forEach((c, i) => { c.holm = holm[i]; c.bonf = bonf[i]; });
+          out.push(table(`事後検定 — ${f === 0 ? w1 : w2}`, [{ key: 'a', label: '', fmt: 'text' }, { key: 'b', label: '', fmt: 'text' }, { key: 'md', label: '平均値の差' }, { key: 'se', label: 'SE' },
+            { key: 't', label: 't' }, { key: 'df', label: '自由度', fmt: 'df' }, ...(o.phHolm ? [{ key: 'holm', label: 'p（Holm）', fmt: 'p' }] : []), ...(o.phBonf ? [{ key: 'bonf', label: 'p（Bonferroni）', fmt: 'p' }] : [])],
+          comps, [`各被験者について${wl.length > 1 ? 'もう一方の要因の水準で平均した値を求め、' : ''}対応のある t 検定で比べ、p 値を補正しています。`]));
+        });
+        // 被験者間の要因：被験者ごとの平均を、被験者間の誤差で比べる
+        if (bc) {
+          const sm = Y.map(r => S.mean(r)), mseM = st0.sse / (k * dfE);
+          const gmeans = glev.map((_, g) => S.mean(sm.filter((_, i) => grp[i] === g))), gn = glev.map((_, g) => grp.filter(v => v === g).length);
+          const comps = [];
+          for (let a = 0; a < G; a++) for (let b = a + 1; b < G; b++) {
+            const md = gmeans[a] - gmeans[b], se = Math.sqrt(mseM * (1 / gn[a] + 1 / gn[b])), t = md / se;
+            comps.push({ a: glev[a], b: glev[b], md, se, t, df: dfE, p: S.ptTwo(t, dfE), tukey: 1 - S.ptukey(Math.abs(t) * Math.SQRT2, G, dfE) });
+          }
+          const ps = comps.map(c => c.p), holm = S.adjust(ps, 'holm'), bonf = S.adjust(ps, 'bonferroni');
+          comps.forEach((c, i) => { c.holm = holm[i]; c.bonf = bonf[i]; });
+          out.push(table(`事後検定 — ${bname}`, [{ key: 'a', label: '', fmt: 'text' }, { key: 'b', label: '', fmt: 'text' }, { key: 'md', label: '平均値の差' }, { key: 'se', label: 'SE' },
+            { key: 't', label: 't' }, { key: 'df', label: '自由度', fmt: 'df' }, ...(o.phTukey ? [{ key: 'tukey', label: 'p（Tukey）', fmt: 'p' }] : []),
+            ...(o.phHolm ? [{ key: 'holm', label: 'p（Holm）', fmt: 'p' }] : []), ...(o.phBonf ? [{ key: 'bonf', label: 'p（Bonferroni）', fmt: 'p' }] : [])],
+          comps, ['各被験者の全セルの平均を、被験者間の誤差（平均平方）を使って比べています。']));
+        }
+      }
+      if (o.plot) out.push(plot('平均値', P.means(L1, series, cellList.map(c => ({ x: c.x, s: c.s, m: c.mean, lo: c.lo, hi: c.hi })), w1, '平均値')),
+        note(`誤差棒は各セルの値だけから求めた ${o.ciLevel}% 信頼区間です（被験者内の相関は考慮していません）。`));
+      if (o.rain) out.push(plot('雨雲プロット', P.raincloud(cellList.map(c => ({ x: c.x, s: c.s, v: c.v })), L1, series, w1, '値', { paired: true })),
+        note(RAIN_NOTE + `灰色の線は同じ人の、${w1} の隣り合う水準の値をつないでいます。`));
+      return out;
+    },
+  });
+
   // ------------------------------------------------------------ 相関
   A.push({
     id: 'correlation', group: '相関・回帰', title: '相関',

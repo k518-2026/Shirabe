@@ -41,5 +41,21 @@ for (const [x, n, p0, a, bf] of R.binom) chk(`二項 ${x}/${n} p0=${p0} ${a}`, S
   const nul = S.logBfGLM(Xc.map(r => r.slice(0, n)), yc, [{ cols: [...Array(n).keys()], r: 1 }]);
   chk('反復測定 閉じた式 = 行列版', closed, full - nul, 1e-3);
 }
+// 2要因の反復測定で使う logBfRMModel（被験者の列をシューア補行列で消去）を、被験者の指示変数を
+// 明示的に列に入れた logBfGLM と比べる（被験者が少なく、事後分布が鋭くない場合）
+{
+  let seed = 9; const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+  const nrm = () => Math.sqrt(-2 * Math.log(rnd() + 1e-12)) * Math.cos(2 * Math.PI * rnd());
+  const n = 10, Qa = [[1 / Math.SQRT2], [-1 / Math.SQRT2]], Qb = [[1 / Math.SQRT2, 1 / Math.sqrt(6)], [-1 / Math.SQRT2, 1 / Math.sqrt(6)], [0, -2 / Math.sqrt(6)]];
+  const y = [], subj = [], XA = [], XB = [];
+  for (let i = 0; i < n; i++) { const s = nrm(); for (let a = 0; a < 2; a++) for (let b = 0; b < 3; b++) { y.push(s + 0.6 * a + 0.3 * b + nrm()); subj.push(i); XA.push(Qa[a]); XB.push(Qb[b]); } }
+  const yc = cy(y), Sind = subj.map(s => Array.from({ length: n }, (_, q) => (q === s ? 1 : 0)));
+  const lNullS = S.logBfRMModel([], yc, subj, n, 6, [], 1), lNullG = S.logBfGLM(center(Sind), yc, [{ cols: [...Array(n).keys()], r: 1 }]);
+  chk('反復測定 被験者だけのモデル（シューア＝行列）', lNullS, lNullG, 1e-3);
+  const XAB = XA.map((a, i) => [...a, ...XB[i]]);
+  const lS = S.logBfRMModel(center(XAB), yc, subj, n, 6, [{ cols: [0], r: 0.5 }, { cols: [1, 2], r: 0.5 }], 1);
+  const lG = S.logBfGLM(center(Sind.map((r, i) => [...r, ...XAB[i]])), yc, [{ cols: [...Array(n).keys()], r: 1 }, { cols: [n], r: 0.5 }, { cols: [n + 1, n + 2], r: 0.5 }]);
+  chk('反復測定 被験者＋A＋B（シューア＝行列）', lS, lG, 1e-3);
+}
 console.log(fail ? `\n${fail} 件不一致` : '\nすべて一致');
 process.exit(fail ? 1 : 0);

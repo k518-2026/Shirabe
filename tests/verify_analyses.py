@@ -225,5 +225,110 @@ chkr("BF 二項 はい", row(J["binomBF"]["二項検定"], lv="はい")["bf"], R
 chkr("BF 二項 いいえ", row(J["binomBF"]["二項検定"], lv="いいえ")["bf"], RB.bf_binom(nn - kk, nn, 0.6))
 chkr("BF+0 二項 はい", row(J["binomBFg"]["二項検定"], lv="はい")["bf"], RB.bf_binom(kk, nn, 0.6, "greater"))
 
+# ---------------------------------------------------------------- 反復測定の分散分析（2要因）
+import statsmodels.formula.api as smf2
+def gg_hf_mauchly(Ymat, C, dfE, groups=None):
+    """球面性：対比の張る部分空間への射影行列で計算（基底の取り方に依らない形。Shirabe は対比得点の積和行列）"""
+    P = C @ np.linalg.pinv(C)                      # 射影行列
+    if groups is None: R = Ymat - Ymat.mean(0)
+    else: R = Ymat - np.vstack([Ymat[groups == g].mean(0) for g in groups])
+    Sg = R.T @ R
+    A = P @ Sg @ P; p = np.linalg.matrix_rank(C)
+    ev = np.sort(np.linalg.eigvalsh(A))[-p:]
+    gg = ev.sum() ** 2 / (p * (ev**2).sum())
+    hf = min(1, ((dfE + 1) * p * gg - 2) / (p * (dfE - p * gg)))
+    W = np.prod(ev) / (ev.mean() ** p)
+    return gg, hf, W
+
+# 被験者内×被験者内（2 × 3）：statsmodels の AnovaRM と
+d2 = pd.read_csv(Path(__file__).parent / "rm2_data.csv", na_values=["NA"]).dropna()
+cells = ["A1B1", "A1B2", "A1B3", "A2B1", "A2B2", "A2B3"]
+long = d2.melt(id_vars=["番号"], value_vars=cells, var_name="cell", value_name="y")
+long["A"] = long["cell"].str[:2]; long["B"] = long["cell"].str[2:]
+aov = AnovaRM(long, "y", "番号", within=["A", "B"]).fit().anova_table
+wt = J["ww"]["被験者内効果"]
+for nm, key in (("A", "A"), ("B", "B"), ("A ✻ B", "A:B")):
+    r = row(wt, term=nm)
+    chk(f"被験者内×被験者内 F {nm}", r["F"], aov.loc[key, "F Value"]); chk(f"被験者内×被験者内 p {nm}", r["p"], aov.loc[key, "Pr > F"])
+Ym = d2[cells].to_numpy(float); nW = len(Ym)
+def hel(k): return RB.helmert(k)
+CB = np.kron(np.ones((2, 1)) / np.sqrt(2), hel(3)); CAB = np.kron(hel(2), hel(3))
+for nm, Cc in (("B", CB), ("A ✻ B", CAB)):  # C という名前は patsy の式の C() と衝突する
+    gg, hf, W = gg_hf_mauchly(Ym, Cc, nW - 1)
+    s = row(J["ww"]["球面性の検定"], term=nm)
+    chk(f"被験者内×被験者内 GG ε {nm}", s["gg"], gg); chk(f"HF ε {nm}", s["hf"], hf); chk(f"Mauchly W {nm}", s["W"], W)
+# GG 補正後の p（B）
+i = next(j for j, r in enumerate(wt) if r["term"] == "B")
+gg = gg_hf_mauchly(Ym, CB, nW - 1)[0]; rB = wt[i]
+chk("被験者内×被験者内 GG 補正後の p（B）", wt[i + 1]["p"], stats.f.sf(rB["F"], 2 * gg, 2 * (nW - 1) * gg))
+# 要因2を使わない1要因の分析（既存）と、2要因版の「A1 の3列」の B の効果は別物なので、1要因版は AnovaRM と照合
+d2all = pd.read_csv(Path(__file__).parent / "rm2_data.csv", na_values=["NA"])  # A1B1〜A1B3 には欠損がないので全員を使う
+l1 = d2all.melt(id_vars=["番号"], value_vars=["A1B1", "A1B2", "A1B3"], var_name="B", value_name="y")
+one = AnovaRM(l1, "y", "番号", within=["B"]).fit().anova_table
+chk("1要因（既存）の F", J["ww1"]["被験者内効果"][0]["F"], one["F Value"].iloc[0])
+
+# 混合計画（指導法 × 時点）：対比得点の列ごとに statsmodels の Type III（Sum 対比）を求めて足し合わせる
+dm = df[["指導法", "事前テスト", "事後テスト", "3か月後"]].dropna().reset_index(drop=True)
+Ym = dm[["事前テスト", "事後テスト", "3か月後"]].to_numpy(float); g = dm["指導法"].to_numpy()
+def strat(Cm):  # 引数名を C にすると式の C() と衝突する
+    ss_int = ss_grp = ss_err = 0.0
+    for j in range(Cm.shape[1]):
+        z = pd.DataFrame({"z": Ym @ Cm[:, j], "g": g})
+        t3 = anova_lm(smf.ols("z ~ C(g, Sum)", z).fit(), typ=3)
+        ss_int += t3.loc["Intercept", "sum_sq"]; ss_grp += t3.loc["C(g, Sum)", "sum_sq"]; ss_err += t3.loc["Residual", "sum_sq"]
+    return ss_int, ss_grp, ss_err
+nM = len(Ym); dfEm = nM - 2
+ssW, ssWG, sseW = strat(hel(3)); ss0, ssG, sse0 = strat(np.ones((3, 1)) / np.sqrt(3))
+mt = J["mixed"]["被験者内効果"]; bt = J["mixed"]["被験者間効果"]
+chk("混合 SS 時点", row(mt, term="時点")["ss"], ssW); chk("混合 SS 時点×指導法", row(mt, term="時点 ✻ 指導法")["ss"], ssWG)
+chk("混合 F 時点", row(mt, term="時点")["F"], (ssW / 2) / (sseW / (2 * dfEm)))
+chk("混合 F 時点×指導法", row(mt, term="時点 ✻ 指導法")["F"], (ssWG / 2) / (sseW / (2 * dfEm)))
+chk("混合 F 指導法（被験者間）", row(bt, term="指導法")["F"], ssG / (sse0 / dfEm))
+gg, hf, W = gg_hf_mauchly(Ym, hel(3), dfEm, groups=g)
+s = J["mixed"]["球面性の検定"][0]
+chk("混合 GG ε", s["gg"], gg); chk("混合 HF ε", s["hf"], hf); chk("混合 Mauchly W", s["W"], W)
+# 混合計画の平方和は、つり合っていれば古典的な分割（split-plot）と一致するはず：群の大きさ 44/45 なのでここでは近いことだけを見る
+# 事後検定：被験者内（周辺平均の対応のある t）
+ph = J["mixed"]["事後検定 — 時点"]
+chk("混合 事後検定 事前−事後 t", row(ph, a="事前テスト", b="事後テスト")["t"], stats.ttest_rel(Ym[:, 0], Ym[:, 1]).statistic)
+# 学級（3群）の混合計画：被験者間の Tukey
+dm3 = df[["学級", "事前テスト", "事後テスト", "3か月後"]].dropna()
+tk = pairwise_tukeyhsd(dm3[["事前テスト", "事後テスト", "3か月後"]].mean(axis=1), dm3["学級"])
+ph3 = J["mixed3"]["事後検定 — 学級"]
+for g1, g2, p in zip(tk.groupsunique[tk._multicomp.pairindices[0]], tk.groupsunique[tk._multicomp.pairindices[1]], tk.pvalues):
+    chk(f"混合 Tukey {g1}-{g2}", row(ph3, a=g1, b=g2)["tukey"], p, 1e-4)
+
+# 反復測定（2要因）のベイズファクター：モデルごとに nquad（適応積分）で求めた値と照合
+import time
+def rm_long(Ymat, extra_cols):
+    """行 = 被験者 × セル。extra_cols(i, c) が固定効果の各ブロックの列（リストのリスト）を返す"""
+    yl, sj, X = [], [], []
+    for i, r in enumerate(Ymat):
+        for c, v in enumerate(r):
+            yl.append(v); sj.append(i); X.append(extra_cols(i, c))
+    return np.array(yl), np.array(sj), X
+def check_rm_bf(label, Ymat, blocks_of, names, table_rows):
+    y, sj, Xb = rm_long(Ymat, blocks_of)
+    lnull = RB.logbf_rm_model_gl(None, y, sj)
+    sets = [[0], [1], [0, 1], [0, 1, 2]]
+    t0 = time.time()
+    for st in sets:
+        X = np.array([np.concatenate([x[j] for j in st]) for x in Xb])
+        off = 0; bl = []
+        for j in st:
+            L = len(Xb[0][j]); bl.append({"cols": list(range(off, off + L)), "r": 0.5}); off += L
+        # 4次元の nquad は 8 分たっても終わらなかったので、nquad と照合済みの Gauss-Legendre 版を使う
+        l = RB.logbf_rm_model_gl(X, y, sj, blocks=bl) - lnull
+        name = " + ".join(names[j] for j in st)
+        chkr(f"{label} BF {name}", row(table_rows, model=name)["bf"], np.exp(l), 1e-3)
+    print(f"   （参照の計算 {time.time() - t0:.0f} 秒）")
+# 混合計画（指導法 × 時点）：ブロックは 指導法・時点・交互作用
+Qg, Qw = RB.helmert(2), RB.helmert(3)
+levM2 = sorted(dm["指導法"].unique()); gi = dm["指導法"].map(levM2.index).to_numpy()
+check_rm_bf("混合", Ym, lambda i, c: [Qg[gi[i]], Qw[c], np.kron(Qw[c], Qg[gi[i]])], ["指導法", "時点", "時点 ✻ 指導法"], J["mixedBF"]["ベイズファクター（モデル比較）"])
+# 被験者内×被験者内（A 2 × B 3）
+Ymw = d2[cells].to_numpy(float); Qa, Qb = RB.helmert(2), RB.helmert(3)
+check_rm_bf("被験者内×被験者内", Ymw, lambda i, c: [Qa[c // 3], Qb[c % 3], np.kron(Qa[c // 3], Qb[c % 3])], ["A", "B", "A ✻ B"], J["wwBF"]["ベイズファクター（モデル比較）"])
+
 print(f"\n{fails} 件不一致" if fails else "\nすべて一致")
 sys.exit(1 if fails else 0)

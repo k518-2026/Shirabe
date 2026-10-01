@@ -357,6 +357,11 @@
         target.append(h('label', { class: 'num', for: id }, op.label,
           h('input', { type: 'number', id, value: it.opt[op.key], min: op.min, max: op.max, step: op.step || 'any',
             oninput: e => { if (e.target.value !== '' && !isNaN(+e.target.value)) { it.opt[op.key] = +e.target.value; refreshItem(it); } } })));
+      } else if (op.type === 'text') {
+        target.append(h('label', { class: 'txt', for: id }, op.label,
+          h('input', { type: 'text', id, value: it.opt[op.key], placeholder: op.placeholder || '', spellcheck: 'false',
+            oninput: e => { it.opt[op.key] = e.target.value; refreshItem(it); } })));
+        if (op.hint) target.append(h('div', { class: 'small opthint' }, op.hint));
       } else if (op.type === 'radio') {
         const g = h('div', { class: 'radios', role: 'radiogroup' });
         op.options.forEach(([v, l]) => g.append(h('label', { class: 'chk' },

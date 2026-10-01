@@ -118,6 +118,9 @@ legend { font-size: 12px; font-weight: 700; color: var(--muted); padding: 0 4px;
 label.chk { display: flex; align-items: center; gap: 7px; padding: 2px 0; cursor: pointer; }
 label.num { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
 label.num input { width: 90px; font: inherit; color: inherit; background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 2px 6px; }
+label.txt { display: grid; gap: 3px; padding: 3px 0; }
+label.txt input { width: 100%; font: inherit; color: inherit; background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 3px 7px; }
+.opthint { margin: 0 0 6px; line-height: 1.45; }
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); width: 15px; height: 15px; margin: 0; }
 
 /* 結果 */
