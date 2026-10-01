@@ -570,6 +570,46 @@
     return ps.slice();
   };
 
+  // ---------------------------------------------------------------- 1因子モデル（ω 係数用）
+  // 共分散行列 C（p × p）に1因子モデル Σ = λλ' + Ψ を最尤法であてはめる（EM アルゴリズム）。
+  // 返り値の λ は合計が正になる向きにそろえる。Ψ が下限に張りついたら heywood = true
+  S.factor1ML = function (C) {
+    const p = C.length, d = C.map((r, i) => r[i]);
+    // 初期値：第1主成分の方向（べき乗法）
+    let v = new Array(p).fill(1);
+    for (let it = 0; it < 200; it++) {
+      const w = C.map(r => r.reduce((s, x, j) => s + x * v[j], 0)), nv = Math.sqrt(S.sum(w.map(x => x * x)));
+      v = w.map(x => x / nv);
+    }
+    const ev = v.reduce((s, x, i) => s + x * C[i].reduce((t, c, j) => t + c * v[j], 0), 0);
+    let lam = v.map(x => x * Math.sqrt(Math.max(ev, 1e-12)) * 0.9);
+    let psi = d.map((x, i) => Math.max(x - lam[i] * lam[i], 0.05 * x));
+    const floor = d.map(x => 1e-6 * x);
+    let heywood = false, it = 0;
+    for (; it < 50000; it++) {
+      // β = λ'Σ⁻¹（ウッドベリーの公式で Σ⁻¹ を避ける）
+      const lp = lam.map((l, i) => l / psi[i]), q = S.sum(lam.map((l, i) => l * lp[i]));
+      const beta = lp.map(x => x / (1 + q));
+      const Sb = C.map(r => r.reduce((s, x, j) => s + x * beta[j], 0));
+      const Ezz = 1 - S.sum(beta.map((b, i) => b * lam[i])) + S.sum(beta.map((b, i) => b * Sb[i]));
+      const nl = Sb.map(x => x / Ezz);
+      const np = d.map((x, i) => x - nl[i] * Sb[i]);
+      heywood = false;
+      for (let i = 0; i < p; i++) if (np[i] < floor[i]) { np[i] = floor[i]; heywood = true; }
+      let delta = 0;
+      for (let i = 0; i < p; i++) delta = Math.max(delta, Math.abs(nl[i] - lam[i]) / Math.sqrt(d[i]), Math.abs(np[i] - psi[i]) / d[i]);
+      lam = nl; psi = np;
+      if (delta < 1e-11) break;
+    }
+    if (S.sum(lam) < 0) lam = lam.map(x => -x);
+    return { lambda: lam, psi, heywood, iterations: it, converged: it < 50000 };
+  };
+  // McDonald の ω（1因子モデルの λ と Ψ から）：(Σλ)² / ((Σλ)² + ΣΨ)
+  S.omega = function (C) {
+    const f = S.factor1ML(C), sl = S.sum(f.lambda);
+    return { omega: sl * sl / (sl * sl + S.sum(f.psi)), ...f };
+  };
+
   // ---------------------------------------------------------------- ベイズファクター
   // どれも BF10（対立仮説 / 帰無仮説）を返す。事前分布の既定値は JASP の既定値にそろえている。
   const logSumExp = a => { const m = Math.max(...a); if (!isFinite(m)) return m; let s = 0; for (const v of a) s += Math.exp(v - m); return m + Math.log(s); };

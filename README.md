@@ -27,7 +27,7 @@ JASP のような「左でデータと変数を選ぶ → 右に APA 形式の�
 | | 線形回帰 | 量的・カテゴリの説明変数、B・SE・β・信頼区間、R²・調整済み R²、分散分析表、VIF、Durbin-Watson、残差の図 |
 | 度数 | 分割表（クロス集計） | 期待度数・行 %・列 %・調整済み残差、χ² 検定（連続性の補正）、尤度比 G²、Fisher の正確検定、φ・Cramér の V・オッズ比 |
 | | 二項検定 | 片側検定、Clopper-Pearson の信頼区間 |
-| 尺度 | 信頼性分析 | Cronbach の α、標準化 α、逆転項目、項目－残余相関、項目を除いた α |
+| 尺度 | 信頼性分析 | Cronbach の α、標準化 α、McDonald の ω（1因子モデルの最尤推定、ブートストラップ信頼区間）、逆転項目、項目－残余相関、項目を除いた α・ω、因子負荷量 |
 
 ## ベイズファクター
 
@@ -80,6 +80,8 @@ node tests/run_analyses.js analyses.json
 python tests/verify_analyses.py analyses.json
 python tests/ref_bayes.py bayes.json
 node tests/verify_bayes.js bayes.json
+python tests/ref_omega.py omega.json
+node tests/verify_omega.js omega.json
 ```
 
 ベイズファクターは R の BayesFactor パッケージ（JASP の計算エンジン）では確かめていません。

@@ -225,6 +225,34 @@ chkr("BF 二項 はい", row(J["binomBF"]["二項検定"], lv="はい")["bf"], R
 chkr("BF 二項 いいえ", row(J["binomBF"]["二項検定"], lv="いいえ")["bf"], RB.bf_binom(nn - kk, nn, 0.6))
 chkr("BF+0 二項 はい", row(J["binomBFg"]["二項検定"], lv="はい")["bf"], RB.bf_binom(kk, nn, 0.6, "greater"))
 
+# ---------------------------------------------------------------- ω 係数（sklearn の FactorAnalysis で）
+from sklearn.decomposition import FactorAnalysis
+def omega_sk(X):
+    fa = FactorAnalysis(n_components=1, tol=1e-12, max_iter=100000).fit(X)
+    lam = fa.components_[0]; lam = lam * np.sign(lam.sum()); s = lam.sum()
+    return s * s / (s * s + fa.noise_variance_.sum()), lam
+it = df[["満足度1", "満足度2", "満足度3", "満足度4"]].dropna().copy()
+lo_, hi_ = it.to_numpy().min(), it.to_numpy().max(); it["満足度3"] = lo_ + hi_ - it["満足度3"]
+Xw = it.to_numpy(float); w, lam = omega_sk(Xw)
+chk("ω（逆転あり）", J["relW"]["尺度の信頼性"][0]["w"], w, 1e-6)
+for j in range(4):
+    chk(f"項目{j + 1}を除いた ω", J["relW"]["項目ごとの統計量"][j]["wdel"], omega_sk(np.delete(Xw, j, axis=1))[0], 1e-6)
+    chk(f"負荷量 λ{j + 1}", J["relW"]["因子負荷量（1因子モデル）"][j]["l"], lam[j], 1e-4)
+    chk(f"標準化した負荷量 {j + 1}", J["relW"]["因子負荷量（1因子モデル）"][j]["ls"], lam[j] / Xw[:, j].std(), 1e-4)
+# ブートストラップ：JS と同じ線形合同法で同じ行を引き、sklearn で ω を求めてパーセンタイルを比べる
+seed = 20261001; nW = len(Xw); bs = []
+for b in range(1000):
+    pick = []
+    for _ in range(nW):
+        seed = (seed * 1664525 + 1013904223) % 2**32; pick.append(int(seed / 4294967296 * nW))
+    bs.append(omega_sk(Xw[pick])[0])
+bs = np.sort(bs)
+chk("ω の 95% 信頼区間 下限", J["relW"]["尺度の信頼性"][0]["wlo"], np.percentile(bs, 2.5), 1e-5)
+chk("ω の 95% 信頼区間 上限", J["relW"]["尺度の信頼性"][0]["whi"], np.percentile(bs, 97.5), 1e-5)
+X3 = df[["満足度1", "満足度2", "満足度4"]].dropna().to_numpy(float)
+chk("ω 3項目", J["relW3"]["尺度の信頼性"][0]["w"], omega_sk(X3)[0], 1e-6)
+chk("ω 2項目は出さない", int("w" in J["relW2"]["尺度の信頼性"][0]), 0)
+
 # ---------------------------------------------------------------- 反復測定の分散分析（2要因）
 import statsmodels.formula.api as smf2
 def gg_hf_mauchly(Ymat, C, dfE, groups=None):

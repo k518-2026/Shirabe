@@ -1395,6 +1395,11 @@
       { type: 'check', key: 'meanr', label: '項目間相関の平均', def: false },
       { type: 'check', key: 'itemStats', label: '項目ごとの統計量', def: true },
       { type: 'check', key: 'scaleStats', label: '合計得点の平均・標準偏差', def: false },
+      { type: 'heading', label: 'ω 係数' },
+      { type: 'check', key: 'omega', label: 'McDonald の ω', def: false },
+      { type: 'check', key: 'loadings', label: '因子負荷量（1因子モデル）', def: false },
+      { type: 'check', key: 'omegaCI', label: 'ω の信頼区間（ブートストラップ 1000 回）', def: false },
+      { type: 'number', key: 'ciLevel', label: '信頼水準 %', def: 95, min: 50, max: 99.9, step: 0.1 },
     ],
     run(ds, sel, o) {
       if (sel.items.length < 2) return sel.items.length ? [note('項目を2つ以上入れてください。')] : [];
@@ -1416,16 +1421,55 @@
       const row = { a: alpha(items) };
       if (o.std) { sc.push({ key: 's', label: '標準化 α' }); row.s = k * rbar / (1 + (k - 1) * rbar); }
       if (o.meanr) { sc.push({ key: 'r', label: '項目間相関の平均' }); row.r = rbar; }
-      if (o.scaleStats) { sc.push({ key: 'm', label: '合計の平均値' }, { key: 'sd', label: '合計の標準偏差' }); row.m = S.mean(total); row.sd = S.sd(total); }
+      // McDonald の ω：1因子モデルを最尤法であてはめ、(Σλ)² / ((Σλ)² + ΣΨ)
+      const useOmega = (o.omega || o.loadings || o.omegaCI) && k >= 3;
+      const covML = its => its.map(a => { const ma = S.mean(a); return its.map(b => { const mb = S.mean(b); let s = 0; for (let r = 0; r < a.length; r++) s += (a[r] - ma) * (b[r] - mb); return s / a.length; }); });
+      const om = useOmega ? S.omega(covML(items)) : null;
+      if (o.omega && om) {
+        sc.push({ key: 'w', label: 'McDonald の ω' }); row.w = om.omega;
+        if (o.omegaCI) {
+          // ブートストラップ（種を固定した乱数で行を復元抽出、パーセンタイル法）。重いので結果を使い回す
+          const key = JSON.stringify(['omegaCI', sel.items, sel.reverse, n, S.sum(total), o.ciLevel]);
+          let ci = bfCacheGet(ds, key);
+          if (!ci) {
+            let seed = 20261001;
+            const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+            const bs = [];
+            for (let b = 0; b < 1000; b++) {
+              const pick = Array.from({ length: n }, () => Math.floor(rnd() * n));
+              const w = S.omega(covML(items.map(v => pick.map(r => v[r])))).omega;
+              if (isFinite(w)) bs.push(w);
+            }
+            const s = S.sorted(bs), a = (1 - level(o)) / 2;
+            ci = [S.quantile(s, a, true), S.quantile(s, 1 - a, true)];
+            bfCacheSet(ds, key, ci);
+          }
+          sc.push({ key: 'wlo', label: '下限', group: `ω の ${o.ciLevel}% 信頼区間` }, { key: 'whi', label: '上限', group: `ω の ${o.ciLevel}% 信頼区間` });
+          [row.wlo, row.whi] = ci;
+        }
+      }
       sc.push({ key: 'n', label: 'N', fmt: 'int' }, { key: 'k', label: '項目数', fmt: 'int' }); row.n = n; row.k = k;
-      const out = [table('尺度の信頼性', sc, [row], clean([excluded(ds, idx), rev.size ? `逆転項目（${[...rev].join('、')}）は (最小値 ${lo} + 最大値 ${hi}) − 値 で反転しています。` : null]))];
+      const out = [table('尺度の信頼性', sc, [row], clean([excluded(ds, idx), rev.size ? `逆転項目（${[...rev].join('、')}）は (最小値 ${lo} + 最大値 ${hi}) − 値 で反転しています。` : null,
+        o.omega && om ? 'ω は1因子モデルを最尤法であてはめた因子負荷量 λ と独自分散 Ψ から (Σλ)² ÷ ((Σλ)² + ΣΨ) で求めています（JASP の既定と同じ考え方）。' : null,
+        o.omega && om && o.omegaCI ? 'ω の信頼区間は行を復元抽出するブートストラップ（1000 回、パーセンタイル法）です。乱数の種を固定しているので、同じデータなら同じ区間になります。' : null,
+        om && om.heywood ? '独自分散が 0 に張りついた項目があります（Heywood ケース）。ω は参考程度にしてください。' : null,
+        (o.omega || o.loadings || o.omegaCI) && k < 3 ? 'ω は1因子モデルが定まるよう項目が3つ以上のときだけ計算します。' : null]))];
+      if (o.loadings && om) {
+        const C = covML(items);
+        out.push(table('因子負荷量（1因子モデル）', [{ key: 'name', label: '項目', fmt: 'text' }, { key: 'l', label: '負荷量 λ' }, { key: 'ls', label: '標準化した負荷量' }, { key: 'psi', label: '独自分散 Ψ' }],
+          items.map((_, j) => ({ name: cs[j].name + (rev.has(cs[j].name) ? '（逆転）' : ''), l: om.lambda[j], ls: om.lambda[j] / Math.sqrt(C[j][j]), psi: om.psi[j] })),
+          ['最尤法による推定です。負荷量の向きは合計が正になるようにそろえています。負荷量が負の項目は、逆転項目の指定を確かめてください。']));
+      }
       if (o.itemStats) {
         const ir = items.map((v, j) => {
           const rest = total.map((t, r) => t - v[r]);
-          return { name: cs[j].name + (rev.has(cs[j].name) ? '（逆転）' : ''), mean: S.mean(v), sd: S.sd(v), rir: S.pearson(v, rest), del: k > 2 ? alpha(items.filter((_, q) => q !== j)) : NaN };
+          const r = { name: cs[j].name + (rev.has(cs[j].name) ? '（逆転）' : ''), mean: S.mean(v), sd: S.sd(v), rir: S.pearson(v, rest), del: k > 2 ? alpha(items.filter((_, q) => q !== j)) : NaN };
+          if (o.omega && om && k > 3) r.wdel = S.omega(covML(items.filter((_, q) => q !== j))).omega;
+          return r;
         });
         out.push(table('項目ごとの統計量', [{ key: 'name', label: '項目', fmt: 'text' }, { key: 'mean', label: '平均値' }, { key: 'sd', label: '標準偏差' },
-          { key: 'rir', label: '項目－残余相関' }, { key: 'del', label: '項目を除いた α' }], ir, ['項目－残余相関は、その項目と残りの項目の合計との相関です。']));
+          { key: 'rir', label: '項目－残余相関' }, { key: 'del', label: '項目を除いた α' }, ...(o.omega && om ? [{ key: 'wdel', label: '項目を除いた ω' }] : [])], ir,
+        clean(['項目－残余相関は、その項目と残りの項目の合計との相関です。', o.omega && om && k === 3 ? '項目が3つのときは、1つ除くと ω が定まらないので「項目を除いた ω」は空欄です。' : null])));
       }
       return out;
     },

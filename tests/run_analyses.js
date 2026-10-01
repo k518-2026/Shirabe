@@ -59,6 +59,10 @@ out.ctBF = run('contingency', { rows: ['性別'], cols: ['合格'] }, { bf: true
 out.ct3BF = run('contingency', { rows: ['学級'], cols: ['合格'] }, { bf: true, bfPrior: 2 });
 out.binomBF = run('binomial', { vars: ['合格'] }, { p0: 0.6, bf: true });
 out.binomBFg = run('binomial', { vars: ['合格'] }, { p0: 0.6, bf: true, alt: 'greater' });
+// ω 係数
+out.relW = timed('信頼性 ω＋ブートストラップ', () => run('reliability', { items: ['満足度1', '満足度2', '満足度3', '満足度4'], reverse: ['満足度3'] }, { omega: true, loadings: true, omegaCI: true }));
+out.relW3 = run('reliability', { items: ['満足度1', '満足度2', '満足度4'] }, { omega: true });
+out.relW2 = run('reliability', { items: ['満足度1', '満足度2'] }, { omega: true, loadings: true });
 // 反復測定の分散分析（2要因）
 // 混合計画：サンプルの 指導法 × 時点（事前・事後・3か月後）
 out.mixed = timed('混合計画', () => run('rmanova2', { cells: ['事前テスト', '事後テスト', '3か月後'], between: ['指導法'] },
