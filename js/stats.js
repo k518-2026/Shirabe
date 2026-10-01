@@ -610,6 +610,486 @@
     return { omega: sl * sl / (sl * sl + S.sum(f.psi)), ...f };
   };
 
+  // ---------------------------------------------------------------- 因子分析（探索的・確認的）
+  // 方法はどれも教科書・原論文の式から書いている（Jöreskog 1967; Rubin & Thayer 1982; Harman 1976;
+  // Bernaards & Jennrich 2005 の勾配射影法; Kaiser 1958; Hendrickson & White 1964; Browne & Cudeck 1993 ほか）
+  const idn = n => Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0)));
+  const mmul = (A, B) => S.matmul(A, B), tpose = A => S.transpose(A);
+  const ssq = A => { let s = 0; for (const r of A) for (const v of r) s += v * v; return s; };
+  const diagOf = A => A.map((r, i) => r[i]);
+  const madd = (A, B, a, b) => A.map((r, i) => r.map((v, j) => a * v + b * B[i][j]));
+
+  // 対称行列の固有値分解（Jacobi 法）。values は降順、vectors[i][k] は k 番目の固有ベクトルの第 i 成分
+  S.eigSym = function (A) {
+    const n = A.length, a = A.map(r => r.slice()), V = idn(n);
+    for (let sweep = 0; sweep < 100; sweep++) {
+      let off = 0, dg = 0;
+      for (let i = 0; i < n; i++) { dg += a[i][i] * a[i][i]; for (let j = i + 1; j < n; j++) off += a[i][j] * a[i][j]; }
+      if (off <= 1e-30 * (dg + off) || off < 1e-300) break;
+      for (let p = 0; p < n - 1; p++) for (let q = p + 1; q < n; q++) {
+        if (Math.abs(a[p][q]) < 1e-300) continue;
+        const theta = (a[q][q] - a[p][p]) / (2 * a[p][q]);
+        const t = (theta >= 0 ? 1 : -1) / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+        const c = 1 / Math.sqrt(t * t + 1), s = t * c;
+        for (let k = 0; k < n; k++) { const x = a[k][p], y = a[k][q]; a[k][p] = c * x - s * y; a[k][q] = s * x + c * y; }
+        for (let k = 0; k < n; k++) { const x = a[p][k], y = a[q][k]; a[p][k] = c * x - s * y; a[q][k] = s * x + c * y; }
+        for (let k = 0; k < n; k++) { const x = V[k][p], y = V[k][q]; V[k][p] = c * x - s * y; V[k][q] = s * x + c * y; }
+      }
+    }
+    const ord = a.map((r, i) => i).sort((i, j) => a[j][j] - a[i][i]);
+    return { values: ord.map(i => a[i][i]), vectors: V.map(r => ord.map(i => r[i])) };
+  };
+  // コレスキー分解で、対称正定値行列の逆行列と対数行列式を返す。正定値でなければ null
+  S.spd = function (A) {
+    const n = A.length, L = Array.from({ length: n }, () => new Array(n).fill(0));
+    for (let i = 0; i < n; i++) for (let j = 0; j <= i; j++) {
+      let s = A[i][j]; for (let k = 0; k < j; k++) s -= L[i][k] * L[j][k];
+      if (i === j) { if (!(s > 1e-300)) return null; L[i][i] = Math.sqrt(s); } else L[i][j] = s / L[j][j];
+    }
+    let logdet = 0; for (let i = 0; i < n; i++) logdet += 2 * Math.log(L[i][i]);
+    const Li = Array.from({ length: n }, () => new Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+      Li[i][i] = 1 / L[i][i];
+      for (let j = 0; j < i; j++) { let s = 0; for (let k = j; k < i; k++) s -= L[i][k] * Li[k][j]; Li[i][j] = s / L[i][i]; }
+    }
+    const inv = Array.from({ length: n }, () => new Array(n).fill(0));
+    for (let a = 0; a < n; a++) for (let b = a; b < n; b++) { let s = 0; for (let k = b; k < n; k++) s += Li[k][a] * Li[k][b]; inv[a][b] = s; inv[b][a] = s; }
+    return { inv, logdet };
+  };
+  // 共分散行列（ddof = 0 なら n で割る最尤推定、1 なら n − 1）と相関行列
+  S.covMat = function (cols, ddof) {
+    const p = cols.length, n = cols[0].length, m = cols.map(S.mean);
+    const C = Array.from({ length: p }, () => new Array(p).fill(0));
+    for (let a = 0; a < p; a++) for (let b = a; b < p; b++) {
+      let s = 0; for (let r = 0; r < n; r++) s += (cols[a][r] - m[a]) * (cols[b][r] - m[b]);
+      C[a][b] = C[b][a] = s / (n - ddof);
+    }
+    return C;
+  };
+  S.cov2cor = C => C.map((r, i) => r.map((v, j) => v / Math.sqrt(C[i][i] * C[j][j])));
+  // 重相関係数の二乗（SMC）：共通性の初期値
+  S.smc = function (R) {
+    const sp = S.spd(R);
+    if (!sp) return R.map(() => 0.5);
+    return sp.inv.map((r, i) => Math.min(0.995, Math.max(0.005, 1 - 1 / r[i])));
+  };
+
+  // 乱数（線形合同法 + Box-Muller）。種を固定して同じ結果を再現できるようにする
+  S.rngNormal = function (seed) {
+    const u = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+    return () => { const a = u(), b = u(); return Math.sqrt(-2 * Math.log(a + 1e-12)) * Math.cos(2 * Math.PI * b); };
+  };
+  // 平行分析（Horn 1965）：同じ n × p の正規乱数の相関行列の固有値の平均と 95 パーセンタイル。
+  // type = 'fa' のときは対角を SMC に置き換えた行列（共通因子の固有値）
+  S.parallelAnalysis = function (n, p, type, nsim, seed) {
+    const nrm = S.rngNormal(seed), all = [];
+    for (let s = 0; s < nsim; s++) {
+      const cols = Array.from({ length: p }, () => Array.from({ length: n }, nrm));
+      let R = S.cov2cor(S.covMat(cols, 1));
+      if (type === 'fa') { const h = S.smc(R); R = R.map((r, i) => r.map((v, j) => (i === j ? h[i] : v))); }
+      all.push(S.eigSym(R).values);
+    }
+    const mean = [], hi = [];
+    for (let k = 0; k < p; k++) {
+      const v = all.map(e => e[k]);
+      mean.push(S.mean(v)); hi.push(S.quantile(v, 0.95));
+    }
+    return { mean, p95: hi };
+  };
+  // 上から数えて、観測の固有値が乱数の平均を上回る間の個数
+  S.paFactors = (obs, sim) => { let m = 0; while (m < obs.length && obs[m] > sim[m]) m++; return m; };
+
+  // KMO（標本妥当性）と Bartlett の球面性検定
+  S.kmo = function (R) {
+    const p = R.length, sp = S.spd(R);
+    if (!sp) return null;
+    const Q = sp.inv.map((r, i) => r.map((v, j) => -v / Math.sqrt(sp.inv[i][i] * sp.inv[j][j])));
+    let r2 = 0, q2 = 0; const ri = new Array(p).fill(0), qi = new Array(p).fill(0);
+    for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) if (i !== j) {
+      r2 += R[i][j] ** 2; q2 += Q[i][j] ** 2; ri[i] += R[i][j] ** 2; qi[i] += Q[i][j] ** 2;
+    }
+    return { overall: r2 / (r2 + q2), items: ri.map((v, i) => v / (v + qi[i])), logdet: sp.logdet };
+  };
+  S.bartlett = function (R, n) {
+    const p = R.length, sp = S.spd(R); if (!sp) return null;
+    const chi = -(n - 1 - (2 * p + 5) / 6) * sp.logdet, df = p * (p - 1) / 2;
+    return { chi, df, p: S.pchisqUpper(chi, df) };
+  };
+
+  // --- 因子の抽出（相関行列 R, 因子数 m）。どれも「主軸の向き」の負荷量 loadings（p × m）と独自分散 psi を返す
+  const topLoad = (M, m) => {
+    const e = S.eigSym(M);
+    return M.map((_, i) => Array.from({ length: m }, (_, k) => e.vectors[i][k] * Math.sqrt(Math.max(e.values[k], 0))));
+  };
+  // 主因子法：共通性を SMC から始め、対角に共通性を入れた相関行列の固有値分解を収束するまで繰り返す
+  S.efaPAF = function (R, m) {
+    let h = S.smc(R), L = null, it = 0, conv = false;
+    for (; it < 20000; it++) {
+      L = topLoad(R.map((r, i) => r.map((v, j) => (i === j ? h[i] : v))), m);
+      const hn = L.map(r => S.sum(r.map(v => v * v)));
+      let d = 0; for (let i = 0; i < h.length; i++) d = Math.max(d, Math.abs(hn[i] - h[i]));
+      h = hn;
+      if (d < 1e-13) { conv = true; break; }
+    }
+    return { loadings: L, psi: h.map((v, i) => R[i][i] - v), iterations: it, converged: conv, heywood: h.some((v, i) => v >= R[i][i]) };
+  };
+  // 最小残差法（Harman 1976）：対角を除いた残差平方和 Σ_{i≠j}(R_ij − λ_i·λ_j)² を最小にする。
+  // 行ごとの最小二乗を順に解く座標降下法（毎回の更新で目的関数は減り続ける）
+  S.efaMinres = function (R, m) {
+    // 主因子法とは別の出発点（主成分の負荷量）から始める。主因子法は収束すると同じ解になるので、独立した確認にもなる
+    const p = R.length, L = topLoad(R, m).map(r => r.slice());
+    let it = 0, conv = false;
+    for (; it < 100000; it++) {
+      let d = 0;
+      for (let i = 0; i < p; i++) {
+        const A = Array.from({ length: m }, () => new Array(m).fill(0)), b = new Array(m).fill(0);
+        for (let j = 0; j < p; j++) if (j !== i) for (let a = 0; a < m; a++) {
+          b[a] += R[i][j] * L[j][a];
+          for (let c = 0; c < m; c++) A[a][c] += L[j][a] * L[j][c];
+        }
+        const Ai = S.inverse(A); if (!Ai) continue;
+        const old = S.sum(L[i].map(v => v * v));
+        L[i] = Ai.map(r => S.sum(r.map((v, c) => v * b[c])));
+        d = Math.max(d, Math.abs(S.sum(L[i].map(v => v * v)) - old));
+      }
+      if (d < 1e-13) { conv = true; break; }
+    }
+    const loadings = topLoad(mmul(L, tpose(L)), m), h = loadings.map(r => S.sum(r.map(v => v * v)));
+    return { loadings, psi: h.map((v, i) => R[i][i] - v), iterations: it, converged: conv, heywood: h.some((v, i) => v >= R[i][i]) };
+  };
+  // 最尤法：EM アルゴリズム（Rubin & Thayer 1982）で独自分散を求め、最後に負荷量を厳密に計算し直す。
+  // 独自分散には R の factanal と同じく下限 0.005 を置く
+  S.efaML = function (R, m) {
+    const p = R.length, LOW = 0.005, sp = S.spd(R);
+    if (!sp) return null;
+    let psi = sp.inv.map((r, i) => (1 - 0.5 * m / p) / r[i]);
+    const lamOf = ps => {
+      const sq = ps.map(Math.sqrt), Ms = R.map((r, i) => r.map((v, j) => v / (sq[i] * sq[j]))), e = S.eigSym(Ms);
+      return Ms.map((_, i) => Array.from({ length: m }, (_, k) => sq[i] * e.vectors[i][k] * Math.sqrt(Math.max(e.values[k] - 1, 0))));
+    };
+    let L = lamOf(psi), it = 0, conv = false;
+    for (; it < 300000; it++) {
+      const lp = L.map((r, i) => r.map(v => v / psi[i]));                  // Ψ⁻¹Λ（p × m）
+      const Mm = S.inverse(madd(idn(m), mmul(tpose(L), lp), 1, 1));          // (I + Λ'Ψ⁻¹Λ)⁻¹
+      if (!Mm) break;
+      const beta = mmul(Mm, tpose(lp));                                     // m × p
+      const Rb = mmul(R, tpose(beta));                                      // R β'
+      const Ezz = madd(madd(idn(m), mmul(beta, L), 1, -1), mmul(beta, Rb), 1, 1);
+      const Ei = S.inverse(Ezz); if (!Ei) break;
+      const Ln = mmul(Rb, Ei), T = mmul(Ln, mmul(beta, R));
+      const pn = psi.map((_, i) => Math.max(R[i][i] - T[i][i], LOW));
+      let d = 0; for (let i = 0; i < p; i++) d = Math.max(d, Math.abs(pn[i] - psi[i]));
+      psi = pn; L = Ln;
+      if (d < 1e-12) { conv = true; break; }
+    }
+    L = lamOf(psi);
+    const Sig = madd(mmul(L, tpose(L)), psi.map((v, i) => psi.map((_, j) => (i === j ? v : 0))), 1, 1), sg = S.spd(Sig);
+    let tr = 0; if (sg) for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) tr += sg.inv[i][j] * R[i][j];
+    const F = sg ? sg.logdet - sp.logdet + tr - p : NaN;
+    return { loadings: L, psi, F, iterations: it, converged: conv, heywood: psi.some(v => v <= LOW * 1.0001) };
+  };
+
+  // --- 回転（勾配射影法 GPA; Bernaards & Jennrich 2005）
+  const polar = X => {
+    const m = X[0].length, e = S.eigSym(mmul(tpose(X), X));
+    const D = Array.from({ length: m }, (_, i) => Array.from({ length: m }, (_, j) => { let s = 0; for (let k = 0; k < m; k++) s += e.vectors[i][k] * e.vectors[j][k] / Math.sqrt(e.values[k]); return s; }));
+    return mmul(X, D);
+  };
+  const crit = {
+    quartimax: L => ({ f: -ssq(L.map(r => r.map(v => v * v))) / 4, Gq: L.map(r => r.map(v => -v * v * v)) }),
+    varimax: L => {
+      const L2 = L.map(r => r.map(v => v * v)), p = L.length, m = L[0].length;
+      const mean = Array.from({ length: m }, (_, k) => S.sum(L2.map(r => r[k])) / p);
+      const QL = L2.map(r => r.map((v, k) => v - mean[k]));
+      return { f: -ssq(QL) / 4, Gq: L.map((r, i) => r.map((v, k) => -v * QL[i][k])) };
+    },
+    oblimin: (L, gam) => {
+      const p = L.length, m = L[0].length, L2 = L.map(r => r.map(v => v * v));
+      let X = L2.map(r => r.map((_, j) => S.sum(r) - r[j]));              // L² (1 − I)
+      if (gam) { const cm = Array.from({ length: m }, (_, j) => S.sum(X.map(r => r[j])) / p); X = X.map(r => r.map((v, j) => v - gam * cm[j])); }
+      let f = 0; for (let i = 0; i < p; i++) for (let j = 0; j < m; j++) f += L2[i][j] * X[i][j];
+      return { f: f / 4, Gq: L.map((r, i) => r.map((v, j) => v * X[i][j])) };
+    },
+  };
+  const kaiserNorm = A => { const w = A.map(r => Math.sqrt(S.sum(r.map(v => v * v))) || 1); return { w, An: A.map((r, i) => r.map(v => v / w[i])) }; };
+  // 直交回転。名前: 'varimax' | 'quartimax'。kaiser = true で行を長さ 1 にそろえてから回す
+  S.rotateOrth = function (A, name, kaiser) {
+    const m = A[0].length;
+    if (m < 2) return { loadings: A, T: idn(m) };
+    const kn = kaiser ? kaiserNorm(A) : null, A0 = kn ? kn.An : A, cf = crit[name];
+    let T = idn(m), cur = cf(A0), G = mmul(tpose(A0), cur.Gq), al = 1;
+    for (let iter = 0; iter < 20000; iter++) {
+      const M = mmul(tpose(T), G), Sm = M.map((r, i) => r.map((v, j) => (v + M[j][i]) / 2));
+      const Gp = madd(G, mmul(T, Sm), 1, -1), s = Math.sqrt(ssq(Gp));
+      if (s < 1e-7) break;               // 勾配の大きさ。1e-8 より小さくは下がらない（丸め誤差）
+      al *= 2;
+      let Tt, ct;
+      for (let i = 0; i <= 10; i++) {
+        Tt = polar(madd(T, Gp, 1, -al)); ct = cf(mmul(A0, Tt));
+        if (ct.f < cur.f - 0.5 * s * s * al) break;
+        al /= 2;
+      }
+      T = Tt; cur = ct; G = mmul(tpose(A0), cur.Gq);
+    }
+    let L = mmul(A0, T);
+    if (kn) L = L.map((r, i) => r.map(v => v * kn.w[i]));
+    return { loadings: L, T };
+  };
+  // 斜交回転（オブリミン; gam = 0 はクォーティミン）。L = A (T')⁻¹, 因子相関 Φ = T'T
+  S.rotateOblimin = function (A, gam) {
+    const m = A[0].length;
+    if (m < 2) return { loadings: A, phi: [[1]], T: idn(m) };
+    const cf = L => crit.oblimin(L, gam || 0), Linv = T => mmul(A, S.inverse(tpose(T)));
+    let T = idn(m), L = Linv(T), cur = cf(L), al = 1;
+    const grad = (L, Gq, T) => tpose(mmul(mmul(tpose(L), Gq), S.inverse(T))).map(r => r.map(v => -v));
+    let G = grad(L, cur.Gq, T);
+    for (let iter = 0; iter < 50000; iter++) {
+      const cs = Array.from({ length: m }, (_, j) => { let s = 0; for (let i = 0; i < m; i++) s += T[i][j] * G[i][j]; return s; });
+      const Gp = G.map((r, i) => r.map((v, j) => v - T[i][j] * cs[j])), s = Math.sqrt(ssq(Gp));
+      if (s < 1e-7) break;               // 勾配の大きさ。1e-8 より小さくは下がらない（丸め誤差）
+      al *= 2;
+      let Tt, Lt, ct;
+      for (let i = 0; i <= 10; i++) {
+        const X = madd(T, Gp, 1, -al), v = Array.from({ length: m }, (_, j) => 1 / Math.sqrt(S.sum(X.map(r => r[j] * r[j]))));
+        Tt = X.map(r => r.map((x, j) => x * v[j]));
+        Lt = Linv(Tt); ct = cf(Lt);
+        if (cur.f - ct.f > 0.5 * s * s * al) break;
+        al /= 2;
+      }
+      T = Tt; L = Lt; cur = ct; G = grad(L, cur.Gq, T);
+    }
+    return { loadings: L, phi: mmul(tpose(T), T), T };
+  };
+  // プロマックス（R の stats::promax と同じ手順; m = 4）
+  S.promax = function (A, mpow) {
+    const m = A[0].length; mpow = mpow || 4;
+    if (m < 2) return { loadings: A, phi: [[1]] };
+    const vm = S.rotateOrth(A, 'varimax', true), X = vm.loadings;
+    const Q = X.map(r => r.map(v => v * Math.pow(Math.abs(v), mpow - 1)));
+    let U = mmul(S.inverse(mmul(tpose(X), X)), mmul(tpose(X), Q));
+    const d = diagOf(S.inverse(mmul(tpose(U), U)));
+    U = U.map(r => r.map((v, j) => v * Math.sqrt(d[j])));
+    const rot = mmul(vm.T, U), ui = S.inverse(rot), C = mmul(ui, tpose(ui));
+    return { loadings: mmul(X, U), phi: S.cov2cor(C) };
+  };
+  // 回転の入口。name: 'none' | 'varimax' | 'quartimax' | 'oblimin' | 'promax'
+  S.efaRotate = function (L0, name) {
+    const m = L0[0].length;
+    if (m < 2 || name === 'none') return { loadings: L0, phi: null };
+    if (name === 'varimax' || name === 'quartimax') return { loadings: S.rotateOrth(L0, name, name === 'varimax').loadings, phi: null };
+    if (name === 'oblimin') { const r = S.rotateOblimin(L0, 0); return { loadings: r.loadings, phi: r.phi }; }
+    return S.promax(L0, 4);
+  };
+  // 因子の並べ替え（寄与の大きい順）と符号の統一（各列の合計が正）。SS 負荷量も返す（斜交は diag(Φ L'L)）
+  S.efaFinalize = function (L, phi) {
+    const p = L.length, m = L[0].length;
+    const sign = Array.from({ length: m }, (_, k) => (S.sum(L.map(r => r[k])) < 0 ? -1 : 1));
+    let Ls = L.map(r => r.map((v, k) => v * sign[k])), Ph = phi ? phi.map((r, i) => r.map((v, j) => v * sign[i] * sign[j])) : null;
+    const ssOf = (LL, PP) => (PP ? diagOf(mmul(PP, mmul(tpose(LL), LL))) : Array.from({ length: m }, (_, k) => S.sum(LL.map(r => r[k] * r[k]))));
+    let ss = ssOf(Ls, Ph);
+    const ord = ss.map((_, k) => k).sort((a, b) => ss[b] - ss[a]);
+    Ls = Ls.map(r => ord.map(k => r[k]));
+    if (Ph) Ph = ord.map(a => ord.map(b => Ph[a][b]));
+    ss = ssOf(Ls, Ph);
+    return { loadings: Ls, phi: Ph, ss, p };
+  };
+
+  // 非心カイ二乗分布の下側確率（ポアソン混合）と RMSEA の信頼区間（Browne & Cudeck 1993）
+  S.pchisqNC = function (x, k, ncp) {
+    if (ncp < 1e-12) return 1 - S.pchisqUpper(x, k);
+    const lam = ncp / 2, jm = Math.floor(lam);
+    const term = j => Math.exp(-lam + j * Math.log(lam) - S.lgamma(j + 1)) * S.gammaP((k + 2 * j) / 2, x / 2);
+    let sum = 0;
+    for (let j = jm; j < jm + 200000; j++) { const t = term(j); sum += t; if (t < 1e-18 * Math.max(sum, 1e-300) && j > jm + 5) break; }
+    for (let j = jm - 1; j >= 0; j--) { const t = term(j); sum += t; if (t < 1e-18 * Math.max(sum, 1e-300) && j < jm - 5) break; }
+    return Math.min(1, sum);
+  };
+  // 返り値は非心パラメータ λ の下限・上限（RMSEA = √(λ / (df · n))）
+  S.rmseaNcp = function (T, df, level) {
+    const a = (1 - level) / 2, f = lam => S.pchisqNC(T, df, lam);
+    const bis = (g, lo, hi) => { for (let i = 0; i < 200; i++) { const mid = (lo + hi) / 2; if (g(mid) > 0) lo = mid; else hi = mid; if (hi - lo < 1e-10 * Math.max(1, hi)) break; } return (lo + hi) / 2; };
+    let lower = 0, upper = 0;
+    if (f(0) > 1 - a) lower = bis(l => f(l) - (1 - a), 0, Math.max(T, 1));
+    if (f(0) > a) { let hi = Math.max(T, df, 1); while (f(hi) > a && hi < 1e9) hi *= 2; upper = bis(l => f(l) - a, 0, hi); }
+    return [lower, upper];
+  };
+
+  // --- 確認的因子分析（最尤法）。Sm: 共分散行列（n で割る）, N: 標本サイズ,
+  //     spec: { p, nf, free[i][k], first[k]（各因子の最初の項目＝マーカー）, orth }, scaling: 'marker' | 'std'
+  //     Σ = ΛΦΛ' + Ψ。推定は因子分散 1 の形で行い、マーカー変数法のときは尺度を変換する（解は同じ）
+  S.bfgs = function (fg, x0, maxIter, gtol) {
+    // 勾配は 6e-9 付近が倍精度の下限（目的関数の差が丸め誤差に埋もれる）なので、判定は 1e-7 にする。
+    // このときパラメータの誤差は 勾配 ÷ ヘッセ行列 ≒ 1e-7 で、標準誤差（0.01 以上）に比べて十分に小さい
+    maxIter = maxIter || 4000; gtol = gtol || 1e-7;
+    const n = x0.length;
+    let x = x0.slice(), cur = fg(x), H = idn(n), it = 0, conv = false;
+    if (!isFinite(cur.f)) return { x, f: cur.f, iterations: 0, converged: false };
+    for (; it < maxIter; it++) {
+      let gmax = 0; for (const v of cur.g) gmax = Math.max(gmax, Math.abs(v));
+      if (gmax < gtol) { conv = true; break; }
+      let d = H.map(r => -S.sum(r.map((v, j) => v * cur.g[j])));
+      let gd = S.sum(d.map((v, j) => v * cur.g[j]));
+      if (gd >= 0) { H = idn(n); d = cur.g.map(v => -v); gd = -S.sum(cur.g.map(v => v * v)); }
+      let step = 1, nx, nf;
+      for (let ls = 0; ls < 60; ls++) {
+        nx = x.map((v, j) => v + step * d[j]); nf = fg(nx);
+        if (isFinite(nf.f) && nf.f <= cur.f + 1e-4 * step * gd) break;
+        step *= 0.5; nf = null;
+      }
+      if (!nf) { conv = gmax < 1e-5; break; }                  // 進めなくなっても、勾配が十分小さければ収束とみなす
+      const s = nx.map((v, j) => v - x[j]), y = nf.g.map((v, j) => v - cur.g[j]), sy = S.sum(s.map((v, j) => v * y[j]));
+      if (sy > 1e-14) {
+        const rho = 1 / sy, Hy = H.map(r => S.sum(r.map((v, j) => v * y[j])));
+        const yHy = S.sum(y.map((v, j) => v * Hy[j]));
+        H = H.map((r, i) => r.map((v, j) => v - rho * (Hy[i] * s[j] + s[i] * Hy[j]) + (rho * rho * yHy + rho) * s[i] * s[j]));
+      }
+      x = nx; cur = nf;
+    }
+    return { x, f: cur.f, iterations: it, converged: conv };
+  };
+
+  S.cfa = function (Sm, N, spec, scaling) {
+    const { p, nf, free, first, orth } = spec;
+    const sp0 = S.spd(Sm);
+    if (!sp0) return { error: '観測の共分散行列が正定値ではありません（項目が線形従属か、完全に相関しています）。' };
+    const logdetS = sp0.logdet;
+    // パラメータの並び（負荷量 → 因子の分散・共分散 → 独自分散）と、それを行列に戻す関数
+    const layout = scl => {
+      const params = [];
+      const fixedLam = free.map((r, i) => r.map((f, k) => (scl === 'marker' && first[k] === i ? 1 : 0)));
+      for (let k = 0; k < nf; k++) for (let i = 0; i < p; i++) if (free[i][k] && !(scl === 'marker' && first[k] === i)) params.push({ t: 'lam', i, k });
+      for (let k = 0; k < nf; k++) for (let l = k; l < nf; l++) if (k === l ? scl === 'marker' : !orth) params.push({ t: 'phi', k, l });
+      for (let i = 0; i < p; i++) params.push({ t: 'psi', i });
+      const unpack = th => {
+        const Lam = fixedLam.map(r => r.slice()), Phi = idn(nf), Psi = new Array(p).fill(0);
+        params.forEach((pr, a) => {
+          if (pr.t === 'lam') Lam[pr.i][pr.k] = th[a];
+          else if (pr.t === 'phi') { Phi[pr.k][pr.l] = th[a]; Phi[pr.l][pr.k] = th[a]; }
+          else Psi[pr.i] = th[a];
+        });
+        return { Lam, Phi, Psi };
+      };
+      return { params, unpack, q: params.length, fixedLam };
+    };
+    const sigmaOf = ({ Lam, Phi, Psi }) => {
+      const LP = mmul(Lam, Phi), Sg = mmul(LP, tpose(Lam));
+      for (let i = 0; i < p; i++) Sg[i][i] += Psi[i];
+      return { Sg, LP };
+    };
+    const Lstd = layout('std'), Lsel = layout(scaling);
+    const dfAll = p * (p + 1) / 2 - Lsel.q;
+    if (dfAll < 0) return { error: `推定するパラメータ（${Lsel.q} 個）が、データから得られる情報（${p * (p + 1) / 2} 個）より多いため、モデルを推定できません。項目を増やすか、モデルを簡単にしてください。` };
+
+    // 最尤推定（因子分散 1 の形）
+    const fg = th => {
+      const m = Lstd.unpack(th), { Sg, LP } = sigmaOf(m), sp = S.spd(Sg);
+      if (!sp) return { f: Infinity, g: null };
+      let tr = 0; for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) tr += sp.inv[i][j] * Sm[i][j];
+      const Dm = Sg.map((r, i) => r.map((v, j) => v - Sm[i][j])), G = mmul(sp.inv, mmul(Dm, sp.inv));
+      const GLP = mmul(G, LP), LGL = mmul(tpose(m.Lam), mmul(G, m.Lam));
+      const g = Lstd.params.map(pr => (pr.t === 'lam' ? 2 * GLP[pr.i][pr.k] : pr.t === 'phi' ? (pr.k === pr.l ? LGL[pr.k][pr.k] : 2 * LGL[pr.k][pr.l]) : G[pr.i][pr.i]));
+      return { f: sp.logdet - logdetS + tr - p, g };
+    };
+    const primary = free.map(r => r.indexOf(true));
+    const th0 = Lstd.params.map(pr => {
+      if (pr.t === 'lam') return (primary[pr.i] === pr.k ? 0.7 : 0.15) * Math.sqrt(Sm[pr.i][pr.i]);
+      if (pr.t === 'phi') return 0.3;
+      return 0.5 * Sm[pr.i][pr.i];
+    });
+    const fit = S.bfgs(fg, th0);
+    let { Lam, Phi, Psi } = Lstd.unpack(fit.x);
+    // 向きをそろえる：各因子の最初の項目の負荷量が正になるように符号を反転
+    for (let k = 0; k < nf; k++) if (Lam[first[k]][k] < 0) {
+      for (let i = 0; i < p; i++) Lam[i][k] = -Lam[i][k];
+      for (let l = 0; l < nf; l++) if (l !== k) { Phi[k][l] = -Phi[k][l]; Phi[l][k] = -Phi[l][k]; }
+    }
+    // マーカー変数法に変換：Λ' = Λ D⁻¹, Φ' = D Φ D（D の対角は各因子のマーカーの負荷量）
+    let unstable = false;
+    if (scaling === 'marker') {
+      const d = first.map((i, k) => Lam[i][k]);
+      if (d.some(v => Math.abs(v) < 1e-6)) unstable = true;
+      Lam = Lam.map(r => r.map((v, k) => v / d[k]));
+      Phi = Phi.map((r, k) => r.map((v, l) => v * d[k] * d[l]));
+    }
+    const th = Lsel.params.map(pr => (pr.t === 'lam' ? Lam[pr.i][pr.k] : pr.t === 'phi' ? Phi[pr.k][pr.l] : Psi[pr.i]));
+    const model = Lsel.unpack(th), { Sg, LP } = sigmaOf(model), sp = S.spd(Sg);
+    if (!sp) return { error: '推定された共分散行列が正定値になりませんでした。モデルを見直してください。' };
+    let tr = 0; for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) tr += sp.inv[i][j] * Sm[i][j];
+    const Fmin = sp.logdet - logdetS + tr - p;
+
+    // 標準誤差（期待情報行列）: cov(θ) = (2/N) M⁻¹, M_ab = tr(Σ⁻¹Σ_a Σ⁻¹Σ_b)
+    const q = Lsel.q, As = Lsel.params.map(pr => {
+      const D = Array.from({ length: p }, () => new Array(p).fill(0));
+      if (pr.t === 'lam') { for (let j = 0; j < p; j++) { D[pr.i][j] += LP[j][pr.k]; D[j][pr.i] += LP[j][pr.k]; } }
+      else if (pr.t === 'phi') {
+        for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) {
+          D[i][j] = model.Lam[i][pr.k] * model.Lam[j][pr.l] + (pr.k === pr.l ? 0 : model.Lam[i][pr.l] * model.Lam[j][pr.k]);
+        }
+      } else D[pr.i][pr.i] = 1;
+      return mmul(sp.inv, D);
+    });
+    const M = Array.from({ length: q }, () => new Array(q).fill(0));
+    for (let a = 0; a < q; a++) for (let b = a; b < q; b++) {
+      let s = 0; for (let i = 0; i < p; i++) for (let j = 0; j < p; j++) s += As[a][i][j] * As[b][j][i];
+      M[a][b] = M[b][a] = s;
+    }
+    const Mi = S.inverse(M), identified = !!Mi;
+    const cov = Mi ? Mi.map(r => r.map(v => v * 2 / N)) : null;
+
+    // 標準化解と、そのデルタ法による標準誤差
+    const stdOf = t => {
+      const m = Lsel.unpack(t), { Sg: Sx } = sigmaOf(m), out = [];
+      for (let i = 0; i < p; i++) for (let k = 0; k < nf; k++) if (free[i][k]) out.push(m.Lam[i][k] * Math.sqrt(m.Phi[k][k]) / Math.sqrt(Sx[i][i]));
+      for (let k = 0; k < nf; k++) for (let l = k; l < nf; l++) out.push(m.Phi[k][l] / Math.sqrt(m.Phi[k][k] * m.Phi[l][l]));
+      for (let i = 0; i < p; i++) out.push(m.Psi[i] / Sx[i][i]);
+      return out;
+    };
+    const sv = stdOf(th);
+    let sSE = sv.map(() => NaN);
+    if (cov) {
+      const J = th.map((v, a) => {
+        const h = 1e-6 * Math.max(1, Math.abs(v)), tp_ = th.slice(), tm_ = th.slice(); tp_[a] += h; tm_[a] -= h;
+        const u = stdOf(tp_), w = stdOf(tm_); return u.map((x, c) => (x - w[c]) / (2 * h));
+      });
+      sSE = sv.map((_, c) => { let s = 0; for (let a = 0; a < q; a++) for (let b = 0; b < q; b++) s += J[a][c] * cov[a][b] * J[b][c]; return Math.sqrt(Math.max(s, 0)); });
+    }
+    const stdLam = free.map(r => r.map(() => null)), seStdLam = free.map(r => r.map(() => null));
+    let c = 0;
+    for (let i = 0; i < p; i++) for (let k = 0; k < nf; k++) if (free[i][k]) { stdLam[i][k] = sv[c]; seStdLam[i][k] = sSE[c]; c++; }
+    const stdPhi = idn(nf), seStdPhi = Array.from({ length: nf }, () => new Array(nf).fill(0));
+    for (let k = 0; k < nf; k++) for (let l = k; l < nf; l++) { stdPhi[k][l] = stdPhi[l][k] = sv[c]; seStdPhi[k][l] = seStdPhi[l][k] = sSE[c]; c++; }
+    const stdPsi = [], seStdPsi = [];
+    for (let i = 0; i < p; i++) { stdPsi.push(sv[c]); seStdPsi.push(sSE[c]); c++; }
+    // 推定値ごとの標準誤差（固定したものは null）
+    const seLam = free.map(r => r.map(() => null)), sePhi = Array.from({ length: nf }, () => new Array(nf).fill(null)), sePsi = new Array(p).fill(null);
+    Lsel.params.forEach((pr, a) => {
+      const se = cov ? Math.sqrt(Math.max(cov[a][a], 0)) : NaN;
+      if (pr.t === 'lam') seLam[pr.i][pr.k] = se; else if (pr.t === 'phi') { sePhi[pr.k][pr.l] = se; sePhi[pr.l][pr.k] = se; } else sePsi[pr.i] = se;
+    });
+
+    // 適合度
+    const chisq = N * Fmin, df = dfAll;
+    let F0 = -logdetS; for (let i = 0; i < p; i++) F0 += Math.log(Sm[i][i]);
+    const chisqB = N * F0, dfB = p * (p - 1) / 2;
+    const dd = Math.max(chisq - df, 0);
+    const cfi = df > 0 || chisq > 0 ? 1 - dd / Math.max(chisq - df, chisqB - dfB, 1e-300) : 1;
+    const tli = df > 0 ? (chisqB / dfB - chisq / df) / (chisqB / dfB - 1) : NaN;
+    const rmsea = df > 0 ? Math.sqrt(dd / (N * df)) : 0;
+    let rmseaLo = NaN, rmseaHi = NaN;
+    if (df > 0) { const [lo, hi] = S.rmseaNcp(chisq, df, 0.9); rmseaLo = Math.sqrt(lo / (N * df)); rmseaHi = Math.sqrt(hi / (N * df)); }
+    let sr = 0; for (let i = 0; i < p; i++) for (let j = i; j < p; j++) sr += ((Sm[i][j] - Sg[i][j]) / Math.sqrt(Sm[i][i] * Sm[j][j])) ** 2;
+    const srmr = Math.sqrt(2 * sr / (p * (p + 1)));
+    const sdS = Sm.map((r, i) => Math.sqrt(r[i])), sdG = Sg.map((r, i) => Math.sqrt(r[i]));
+    const resid = Sm.map((r, i) => r.map((v, j) => v / (sdS[i] * sdS[j]) - Sg[i][j] / (sdG[i] * sdG[j])));
+    const heywood = model.Psi.some(v => v < 0) || stdLam.some(r => r.some(v => v !== null && Math.abs(v) > 1));
+    return {
+      ok: true, converged: fit.converged, iterations: fit.iterations, N, p, nf, q, df, chisq, pval: df > 0 ? S.pchisqUpper(chisq, df) : NaN,
+      chisqB, dfB, pvalB: S.pchisqUpper(chisqB, dfB), cfi, tli, rmsea, rmseaLo, rmseaHi, srmr,
+      Lam: model.Lam, Phi: model.Phi, Psi: model.Psi, Sigma: Sg, lamFixed: free.map((r, i) => r.map((f, k) => f && Lsel.fixedLam[i][k] === 1)),
+      seLam, sePhi, sePsi, stdLam, stdPhi, stdPsi, seStdLam, seStdPhi, seStdPsi, resid, identified, heywood, unstable,
+    };
+  };
+
   // ---------------------------------------------------------------- ベイズファクター
   // どれも BF10（対立仮説 / 帰無仮説）を返す。事前分布の既定値は JASP の既定値にそろえている。
   const logSumExp = a => { const m = Math.max(...a); if (!isFinite(m)) return m; let s = 0; for (const v of a) s += Math.exp(v - m); return m + Math.log(s); };

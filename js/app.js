@@ -156,7 +156,7 @@
   function inlineSvg(svg) {
     const cs = getComputedStyle(document.documentElement);
     let s = svg.outerHTML.replace(/var\((--[\w-]+)\)/g, (_, v) => cs.getPropertyValue(v).trim());
-    const style = `<style>.grid{stroke:#ddd}.axis{stroke:#444}.tick{fill:#333;font:12px sans-serif}.lab{fill:#222;font:13px sans-serif}.bar{fill:${cs.getPropertyValue('--plot-1').trim()};fill-opacity:.8}.dot{fill:${cs.getPropertyValue('--plot-1').trim()};fill-opacity:.7}.fitline{stroke:${cs.getPropertyValue('--plot-2').trim()};stroke-width:2}.whisker{stroke:#555}.outlier{fill:none;stroke:#555}.pairline{stroke:#555;stroke-opacity:.25}</style>`;
+    const style = `<style>.grid{stroke:#ddd}.axis{stroke:#444}.tick{fill:#333;font:12px sans-serif}.lab{fill:#222;font:13px sans-serif}.bar{fill:${cs.getPropertyValue('--plot-1').trim()};fill-opacity:.8}.dot{fill:${cs.getPropertyValue('--plot-1').trim()};fill-opacity:.7}.fitline{stroke:${cs.getPropertyValue('--plot-2').trim()};stroke-width:2}.whisker{stroke:#555}.outlier{fill:none;stroke:#555}.pairline{stroke:#555;stroke-opacity:.25}.refline{stroke:#555;stroke-width:1;stroke-dasharray:3 4;opacity:.7}.pd-box{fill:#fff;stroke:#555;stroke-width:1.4}.pd-ell{fill:#e3f1f6;stroke:#176b87;stroke-width:1.6}.pd-line{stroke:#555;stroke-width:1.4;fill:none}.pd-dash{stroke-dasharray:5 4}.pd-arrow{fill:#555}.pd-text{fill:#111;font:12px sans-serif}.pd-num{fill:#111;font:11.5px sans-serif;paint-order:stroke;stroke:#fff;stroke-width:3.5px;stroke-linejoin:round}</style>`;
     return s.replace(/^<svg([^>]*)>/, `<svg$1>${style}`);
   }
   function download(name, content, type) {
@@ -226,7 +226,8 @@
         h('div', { class: 'bigbtns' },
           h('button', { class: 'primary', onclick: () => $('#file').click() }, 'ファイルを開く'),
           h('button', { onclick: openPaste }, '貼り付け'),
-          h('button', { onclick: loadSample }, 'サンプルデータ')),
+          h('button', { onclick: loadSample }, 'サンプルデータ'),
+          h('button', { onclick: loadSampleFA, title: '架空の質問紙（12 項目 × 300 人、3 因子）。因子分析を試せます' }, '因子分析用サンプル')),
         h('div', { class: 'drop' }, 'ここにファイルをドロップしても読み込めます'),
         h('p', { class: 'small' }, 'データはこのブラウザーの中だけで処理され、どこにも送信されません。文字コードは UTF-8 と Shift_JIS に対応しています。')));
       return wrap;
@@ -400,6 +401,10 @@
     try { setData(D.parseText(window.SAMPLE_CSV, 'サンプル（架空の授業データ）')); }
     catch (e) { toast(e.message); }
   }
+  function loadSampleFA() {
+    try { setData(D.parseText(window.SAMPLE_FA_CSV, 'サンプル（架空の質問紙：因子分析用）')); }
+    catch (e) { toast(e.message); }
+  }
   function openPaste() {
     const dlg = $('#pasteDlg');
     $('#pasteText').value = '';
@@ -456,6 +461,7 @@
     $('#file').addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); e.target.value = ''; });
     $('#btnPaste').addEventListener('click', openPaste);
     $('#btnSample').addEventListener('click', loadSample);
+    $('#btnSampleFA').addEventListener('click', loadSampleFA);
     $('#btnData').addEventListener('click', () => { state.active = null; renderLeft(); markActive(); });
     $('#btnExport').addEventListener('click', exportResults);
     $('#btnPrint').addEventListener('click', () => window.print());

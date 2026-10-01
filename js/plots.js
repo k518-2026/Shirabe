@@ -35,7 +35,7 @@
       g += `<text x="${x0 - 8}" y="${sy(t) + 4}" text-anchor="end" class="tick">${fmtTick(t)}</text>`;
     }
     if (!opt.categorical) {
-      for (const t of ticks(xr[0], xr[1])) {
+      for (const t of opt.xticks || ticks(xr[0], xr[1])) {
         if (t < xr[0] - 1e-9 || t > xr[1] + 1e-9) continue;
         g += `<line x1="${sx(t)}" x2="${sx(t)}" y1="${y0}" y2="${y0 + 5}" class="axis"/>`;
         g += `<text x="${sx(t)}" y="${y0 + 19}" text-anchor="middle" class="tick">${fmtTick(t)}</text>`;
@@ -160,6 +160,88 @@
     for (let i = 0; i < n; i++) b += `<circle cx="${f.sx(z[i]).toFixed(1)}" cy="${f.sy(std[i]).toFixed(1)}" r="3.5" class="dot"/>`;
     return svg(b, `${lab} の Q-Q プロット`);
   };
+
+  // スクリープロット：固有値の折れ線。Kaiser の基準（1）と、平行分析（乱数の固有値の平均）を重ねる
+  // pa は null でもよい。nf は採用した因子数（その位置に縦の目印を入れる）
+  P.scree = function (eig, pa, nf, ylab) {
+    const k = eig.length; if (!k) return '';
+    const all = eig.concat(pa || [], [1]);
+    const yr = [Math.min(0, Math.min(...all)), Math.max(...all) * 1.08];
+    const f = frame([0.5, k + 0.5], yr, { xlab: '成分（因子）の番号', ylab: ylab || '固有値', xticks: Array.from({ length: k }, (_, i) => i + 1).filter(i => k <= 12 || i % 2 === 1) });
+    let b = f.g;
+    b += `<line x1="${f.x0}" x2="${f.x1}" y1="${f.sy(1)}" y2="${f.sy(1)}" class="refline"><title>Kaiser の基準（固有値 = 1）</title></line>`;
+    if (nf >= 1 && nf < k) b += `<line x1="${f.sx(nf + 0.5)}" x2="${f.sx(nf + 0.5)}" y1="${f.y1}" y2="${f.y0}" class="refline"><title>採用した因子数</title></line>`;
+    const line = (v, cls, col) => {
+      const pts = v.map((y, i) => `${f.sx(i + 1).toFixed(1)},${f.sy(y).toFixed(1)}`).join(' ');
+      return `<polyline points="${pts}" fill="none" style="stroke:${col}" stroke-width="2" ${cls || ''}/>` + v.map((y, i) => `<circle cx="${f.sx(i + 1).toFixed(1)}" cy="${f.sy(y).toFixed(1)}" r="3.8" style="fill:${col}"><title>${i + 1}: ${fmtTick(y)}</title></circle>`).join('');
+    };
+    if (pa) b += line(pa, 'stroke-dasharray="5 4"', SERIES[1]);
+    b += line(eig, '', SERIES[0]);
+    const lg = [['観測データ', SERIES[0]]].concat(pa ? [['平行分析（乱数の平均）', SERIES[1]]] : []);
+    lg.forEach(([t, c], i) => {
+      const y = M.t + 8 + i * 18;
+      b += `<circle cx="${W - M.r - 150}" cy="${y}" r="5" style="fill:${c}"/><text x="${W - M.r - 140}" y="${y + 4}" class="tick">${esc(t)}</text>`;
+    });
+    return svg(b, 'スクリープロット');
+  };
+
+  // 確認的因子分析のパス図（標準化した解）。左に因子（楕円）、右に項目（四角）を縦に並べる。
+  // 項目が多くても横に伸びず、画面幅に収めても文字が読める。
+  // m: { factors: [名前], items: [{name, loads: [λ*（その因子に負荷しない所は null）], psi, primary}], phi: 因子間相関 }
+  let pdId = 0;
+  P.pathDiagram = function (m) {
+    const nf = m.factors.length, p = m.items.length;
+    const order = [...Array(p).keys()].sort((a, b) => (m.items[a].primary - m.items[b].primary) || (a - b));   // 主な因子ごとにまとめる
+    const showPhi = nf >= 2 && nf <= 5, arcStep = 30;
+    const rowH = 40, bh = 28, bw = 104, top = 22, ery = 24;
+    const rx = k => Math.max(48, 7 * Math.min(m.factors[k].length, 8) + 14);
+    const rxMax = Math.max(...m.factors.map((_, k) => rx(k)));
+    const arcsW = showPhi ? (nf - 1) * arcStep + 30 : 6;
+    const fcx = arcsW + 8 + rxMax;                          // 因子の楕円の中心の x
+    const ix = fcx + rxMax + 150;                           // 項目の四角の左端
+    const Wd = ix + bw + 76, Hd = top + p * rowH + 12;
+    const iy = new Array(p);
+    order.forEach((i, pos) => { iy[i] = top + pos * rowH + bh / 2; });                              // 各項目の中心の y
+    const fy = m.factors.map((_, k) => {
+      const ys = m.items.map((it, i) => (it.primary === k ? iy[i] : null)).filter(v => v !== null);
+      return ys.length ? S_mean(ys) : Hd / 2;
+    });
+    const id = `pd${++pdId}`;
+    let b = `<defs><marker id="${id}a" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="8" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,4 L0,8 z" class="pd-arrow"/></marker></defs>`;
+    const fmt = v => (v === null || v === undefined || !isFinite(v) ? '' : v.toFixed(2).replace(/^(-?)0\./, '$1.'));
+    const trunc = s => (s.length > 8 ? s.slice(0, 7) + '…' : s);
+    // 因子間の相関（左側の弧）。隣り合う因子は小さい弧、離れた因子は大きい弧
+    if (showPhi) {
+      for (let d = 1; d < nf; d++) for (let k = 0; k + d < nf; k++) {
+        const l = k + d, y1 = fy[k], y2 = fy[l], e = d * arcStep;
+        const x1 = fcx - rx(k) * 0.72, x2 = fcx - rx(l) * 0.72;                  // 楕円の左端あたりから出る
+        b += `<path d="M${x1},${y1 - ery * 0.62} C${x1 - e - 6},${y1} ${x2 - e - 6},${y2} ${x2},${y2 + ery * 0.62}" class="pd-line" marker-start="url(#${id}a)" marker-end="url(#${id}a)"/>`;
+        b += `<text x="${Math.min(x1, x2) - e * 0.78 - 12}" y="${(y1 + y2) / 2 + 4}" text-anchor="end" class="pd-num">${fmt(m.phi[k][l])}</text>`;
+      }
+    }
+    // 矢印（因子 → 項目）と標準化した負荷量
+    m.items.forEach((it, i) => {
+      it.loads.forEach((v, k) => {
+        if (v === null) return;
+        const x1 = fcx + rx(k), y1 = fy[k], x2 = ix, y2 = iy[i], prim = it.primary === k;
+        b += `<line x1="${x1}" y1="${y1}" x2="${x2 - 1}" y2="${y2}" class="pd-line${prim ? '' : ' pd-dash'}" marker-end="url(#${id}a)"/>`;
+        const t = prim ? 0.68 : 0.9;
+        b += `<text x="${x1 + (x2 - x1) * t}" y="${y1 + (y2 - y1) * t - 3}" text-anchor="middle" class="pd-num">${fmt(v)}</text>`;
+      });
+      // 独自分散（箱の右）
+      b += `<line x1="${ix + bw + 30}" y1="${iy[i]}" x2="${ix + bw}" y2="${iy[i]}" class="pd-line" marker-end="url(#${id}a)"/>`;
+      b += `<text x="${ix + bw + 36}" y="${iy[i] + 4}" class="pd-num">${fmt(it.psi)}</text>`;
+    });
+    m.items.forEach((it, i) => {
+      b += `<rect x="${ix}" y="${iy[i] - bh / 2}" width="${bw}" height="${bh}" rx="4" class="pd-box"><title>${esc(it.name)}</title></rect>`;
+      b += `<text x="${ix + bw / 2}" y="${iy[i] + 4}" text-anchor="middle" class="pd-text">${esc(trunc(it.name))}</text>`;
+    });
+    m.factors.forEach((nm, k) => {
+      b += `<ellipse cx="${fcx}" cy="${fy[k]}" rx="${rx(k)}" ry="${ery}" class="pd-ell"/>`;
+      b += `<text x="${fcx}" y="${fy[k] + 4}" text-anchor="middle" class="pd-text">${esc(nm)}</text>`;
+    });
+    return `<svg class="plot" viewBox="0 0 ${Wd} ${Hd}" role="img" aria-label="パス図" xmlns="http://www.w3.org/2000/svg">${b}</svg>`;
+  };  const S_mean = a => a.reduce((s, v) => s + v, 0) / a.length;
 
   // 棒グラフ（度数）
   P.bars = function (labels, counts, xlab) {

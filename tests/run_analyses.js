@@ -91,5 +91,47 @@ out.mixed3 = run('rmanova2', { cells: ['事前テスト', '事後テスト', '3�
   // 1要因の既存の分析と、要因2を「混合計画の群が1つもない形」にできないので、同じ F を別経路で比べる
   out.ww1 = run2('rmanova', { vars: ['A1B1', 'A1B2', 'A1B3'] }, { gg: true });
 }
+// 因子分析（samples/sample_fa.csv：意欲・不安・自信の3因子 × 4項目, 300 人）
+{
+  const dsFA = D.parseText(fs.readFileSync(path.join(__dirname, '..', 'samples', 'sample_fa.csv'), 'utf8').replace(/^﻿/, ''), 'fa');
+  const runFA = (id, sel, opt) => {
+    const def = A.find(a => a.id === id), o = {}, s = {};
+    for (const op of def.options) if (op.key) o[op.key] = op.def;
+    for (const sl of def.slots) s[sl.key] = [];
+    const blocks = def.run(dsFA, Object.assign(s, sel), Object.assign(o, opt));
+    for (const b of blocks) if (b.type === 'error') throw new Error(`${id}: ${b.text}`);
+    for (const b of blocks) if (b.type === 'plot' && !/^<svg[\s\S]*<\/svg>$/.test(b.svg)) throw new Error(`${id}: 図が空`);
+    return Object.fromEntries(blocks.filter(b => b.type === 'table').map(b => [b.title, b.rows]));
+  };
+  const items12 = ['意欲1', '意欲2', '意欲3', '意欲4', '不安1', '不安2', '不安3', '不安4', '自信1', '自信2', '自信3', '自信4'];
+  const efaAll = { eigen: true, pa: true, scree: true, kmo: true, resid: true, struct: true, cut: 0 };
+  // 因子数は平行分析（既定）。抽出法 3 × 回転 5 の組み合わせをすべて動かす
+  out.fa = {};
+  for (const method of ['minres', 'paf', 'ml']) for (const rotation of ['oblimin', 'promax', 'varimax', 'quartimax', 'none']) {
+    out.fa[`${method}-${rotation}`] = runFA('efa', { items: items12 }, { ...efaAll, method, rotation, nfMethod: 'fixed', nf: 3 });
+  }
+  out.faPA = timed('EFA 平行分析（pc）', () => runFA('efa', { items: items12 }, { ...efaAll, nfMethod: 'parallel' }));
+  out.faPAfa = runFA('efa', { items: items12 }, { ...efaAll, nfMethod: 'parallel', paBase: 'fa' });
+  out.faKaiser = runFA('efa', { items: items12 }, { nfMethod: 'kaiser', rotation: 'varimax', sort: true });
+  out.fa2 = runFA('efa', { items: items12 }, { nfMethod: 'fixed', nf: 2, method: 'ml', rotation: 'oblimin' });
+  out.fa1 = runFA('efa', { items: items12.slice(0, 4) }, { nfMethod: 'fixed', nf: 1, method: 'ml' });
+  // 確認的因子分析
+  const f3 = { f1: items12.slice(0, 4), f2: items12.slice(4, 8), f3: items12.slice(8, 12) };
+  const cfaAll = { reliab: true, resid: true, path: true, stdSE: true };
+  out.cfaMarker = timed('CFA マーカー', () => runFA('cfa', f3, { ...cfaAll, fname1: '意欲', fname2: '不安', fname3: '自信' }));
+  out.cfaStd = runFA('cfa', f3, { ...cfaAll, scaling: 'std', fname1: '意欲', fname2: '不安', fname3: '自信' });
+  out.cfaOrth = runFA('cfa', f3, { orth: true, stdSE: true });
+  out.cfaCross = runFA('cfa', { ...f3, f3: [...items12.slice(8, 12), '意欲4'] }, { path: true, ciLevel: 90, stdSE: true });   // 意欲4 が自信にも負荷（交差負荷）
+  out.cfa1 = runFA('cfa', { f1: items12.slice(0, 4) }, { stdSE: true });
+  out.cfa2f = runFA('cfa', { f1: items12.slice(0, 3), f2: items12.slice(4, 7) }, { scaling: 'std', stdSE: true });
+  // 1 項目だけの因子はエラー、項目が足りないときは案内になる
+  for (const bad of [{ f1: ['意欲1'], f2: items12.slice(4, 8) }]) {
+    const def = A.find(a => a.id === 'cfa'), o = {}, s = {};
+    for (const op of def.options) if (op.key) o[op.key] = op.def;
+    for (const sl of def.slots) s[sl.key] = [];
+    const bl = def.run(dsFA, Object.assign(s, bad), o);
+    if (!(bl.length === 1 && bl[0].type === 'error')) throw new Error('cfa: 1項目の因子がエラーにならない');
+  }
+}
 fs.writeFileSync(process.argv[2], JSON.stringify(out, (k, v) => (typeof v === 'number' && !isFinite(v) ? String(v) : v), 1));
 console.log('分析を実行しました:', Object.keys(out).length, '件');

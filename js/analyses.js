@@ -1476,5 +1476,307 @@
     },
   });
 
+  // ------------------------------------------------------------ 探索的因子分析（EFA）
+  const kmoLabel = v => (v >= 0.9 ? 'とても良い' : v >= 0.8 ? '良い' : v >= 0.7 ? 'まあまあ' : v >= 0.6 ? '平凡' : v >= 0.5 ? '悪い' : '不適切');
+  const paCache = new Map();
+  const getPA = (n, p, type) => {
+    const key = `${n}|${p}|${type}`;
+    if (!paCache.has(key)) paCache.set(key, S.parallelAnalysis(n, p, type, 500, 20261002));
+    return paCache.get(key);
+  };
+  const ROT_NAME = { none: '回転なし', varimax: 'バリマックス', quartimax: 'クォーティマックス', oblimin: 'オブリミン', promax: 'プロマックス' };
+  const METHOD_NAME = { minres: '最小残差法', paf: '主因子法', ml: '最尤法' };
+
+  A.push({
+    id: 'efa', group: '尺度', title: '探索的因子分析（EFA）',
+    slots: [{ key: 'items', label: '項目（3つ以上）', multi: true, types: ['scale', 'ordinal'] }],
+    options: [
+      { type: 'heading', label: '因子数' },
+      { type: 'radio', key: 'nfMethod', options: [['parallel', '平行分析で決める'], ['kaiser', '固有値が 1 より大きい数'], ['fixed', '指定する']], def: 'parallel' },
+      { type: 'number', key: 'nf', label: '指定する因子数', def: 2, min: 1, step: 1 },
+      { type: 'radio', key: 'paBase', options: [['pc', '平行分析の基準: 相関行列の固有値（主成分）'], ['fa', '平行分析の基準: 共通性を入れた固有値（共通因子）']], def: 'pc' },
+      { type: 'heading', label: '抽出法' },
+      { type: 'radio', key: 'method', options: [['minres', '最小残差法'], ['paf', '主因子法'], ['ml', '最尤法']], def: 'minres' },
+      { type: 'heading', label: '回転' },
+      { type: 'radio', key: 'rotation', options: [['oblimin', '斜交: オブリミン'], ['promax', '斜交: プロマックス'], ['varimax', '直交: バリマックス'], ['quartimax', '直交: クォーティマックス'], ['none', '回転しない']], def: 'oblimin' },
+      { type: 'heading', label: '表示' },
+      { type: 'number', key: 'cut', label: '負荷量の表示下限（これ未満は空欄）', def: 0.3, min: 0, max: 1, step: 0.05 },
+      { type: 'check', key: 'sort', label: '負荷量の大きさで項目を並べ替える', def: false },
+      { type: 'check', key: 'chars', label: '因子の特性（SS 負荷量・寄与率）', def: true },
+      { type: 'check', key: 'phi', label: '因子間相関（斜交回転のとき）', def: true },
+      { type: 'check', key: 'struct', label: '構造行列（斜交回転のとき）', def: false },
+      { type: 'check', key: 'fit', label: '適合度（最尤法のとき）', def: true },
+      { type: 'check', key: 'resid', label: '残差相関', def: false },
+      { type: 'heading', label: '因子数の目安' },
+      { type: 'check', key: 'eigen', label: '固有値の表', def: false },
+      { type: 'check', key: 'pa', label: '平行分析の結果を加える', def: false },
+      { type: 'check', key: 'scree', label: 'スクリープロット', def: false },
+      { type: 'heading', label: 'データの適切さ' },
+      { type: 'check', key: 'kmo', label: 'KMO と Bartlett の球面性検定', def: false },
+    ],
+    run(ds, sel, o) {
+      if (sel.items.length < 3) return sel.items.length ? [note('項目を3つ以上入れてください。')] : [];
+      const cs = sel.items.map(n => col(ds, n)), idx = D.complete(ds, cs), n = idx.length, p = cs.length;
+      if (n <= p) return [err(`有効な行（${n} 行）が項目数（${p}）以下です。項目数より多い行が必要です。`)];
+      const X = cs.map(c => vals(c, idx));
+      if (X.some(v => S.variance(v) < 1e-12)) return [err('値がすべて同じ項目があります。その項目を外してください。')];
+      const R = S.cov2cor(S.covMat(X, 1)), sp = S.spd(R);
+      if (!sp) return [err('相関行列が特異です（項目が線形従属か、完全に相関しています）。項目を見直してください。')];
+      const eig = S.eigSym(R).values, out = [];
+
+      // 因子数
+      const usePA = o.nfMethod === 'parallel' || o.pa;
+      const paType = o.paBase === 'fa' ? 'fa' : 'pc';
+      const pa = usePA ? getPA(n, p, paType) : null;
+      const hSMC = S.smc(R);
+      const obs = paType === 'fa' ? S.eigSym(R.map((r, i) => r.map((v, j) => (i === j ? hSMC[i] : v)))).values : eig;
+      let m, mNote;
+      if (o.nfMethod === 'fixed') { m = Math.round(Number(o.nf) || 1); mNote = `因子数は ${m} に指定されています。`; }
+      else if (o.nfMethod === 'kaiser') { m = eig.filter(v => v > 1).length; mNote = `固有値が 1 より大きい成分が ${m} 個あるので、因子数を ${m} にしました。`; }
+      else { m = S.paFactors(obs, pa.mean); mNote = `平行分析（乱数データ 500 組の固有値の平均と比べる）で、因子数を ${m} にしました。`; }
+      if (m < 1) { m = 1; mNote += '（候補が 0 個だったので 1 にしています）'; }
+      const dfEFA = ((p - m) ** 2 - (p + m)) / 2;
+      if (m >= p || dfEFA < 0) return [err(`因子数 ${m} は項目数 ${p} に対して多すぎます（モデルの自由度が負になります）。因子数を減らすか、項目を増やしてください。`)];
+
+      // 抽出と回転
+      const ext = o.method === 'ml' ? S.efaML(R, m) : o.method === 'paf' ? S.efaPAF(R, m) : S.efaMinres(R, m);
+      if (!ext) return [err('因子を抽出できませんでした。')];
+      const rotName = m > 1 ? o.rotation : 'none';
+      const rot = S.efaRotate(ext.loadings, rotName), fin = S.efaFinalize(rot.loadings, rot.phi);
+      const P_ = fin.loadings, Phi = fin.phi, oblique = !!Phi;
+      const PhiE = Phi || Array.from({ length: m }, (_, i) => Array.from({ length: m }, (_, j) => (i === j ? 1 : 0)));
+      const PPt = S.matmul(S.matmul(P_, PhiE), S.transpose(P_));
+      const h2 = PPt.map((r, i) => r[i]), uniq = h2.map(v => 1 - v);
+      const fnames = Array.from({ length: m }, (_, k) => `因子${k + 1}`);
+
+      // 表示順
+      let order = cs.map((_, i) => i);
+      if (o.sort) {
+        const dom = P_.map(r => r.reduce((b, v, k) => (Math.abs(v) > Math.abs(r[b]) ? k : b), 0));
+        order = order.sort((a, b) => (dom[a] - dom[b]) || (Math.abs(P_[b][dom[b]]) - Math.abs(P_[a][dom[a]])));
+      }
+      const cut = Math.max(0, Number(o.cut) || 0);
+      const lcols = [{ key: 'item', label: '項目', fmt: 'text' }, ...fnames.map((nm, k) => ({ key: `f${k}`, label: nm })), { key: 'u', label: '独自性' }];
+      const lrows = order.map(i => {
+        const r = { item: cs[i].name, u: uniq[i] };
+        P_[i].forEach((v, k) => { r[`f${k}`] = Math.abs(v) >= cut ? v : null; });
+        return r;
+      });
+      const notesL = clean([
+        mNote,
+        `抽出法: ${METHOD_NAME[o.method]}、回転: ${ROT_NAME[rotName]}${m < 2 && o.rotation !== 'none' ? '（因子が 1 つなので回転は行いません）' : ''}。N = ${n}。${excluded(ds, idx) || ''}`,
+        oblique ? '斜交回転なので、表の負荷量はパターン行列（ほかの因子の影響を除いた値）です。' : null,
+        cut > 0 ? `絶対値が ${cut} 未満の負荷量は空欄にしています。` : null,
+        '独自性は 1 − 共通性（その項目の分散のうち、因子で説明されない割合）です。',
+        o.fit && o.method !== 'ml' ? '適合度（χ²・RMSEA・TLI）は、抽出法を「最尤法」にすると表示されます。' : null,
+        !ext.converged ? '収束しきれなかった可能性があります。結果は参考にとどめてください。' : null,
+        ext.heywood ? '共通性が 1 に達した項目（Heywood ケース）があります。因子数を減らすか、項目を見直してください。' : null,
+        o.method === 'paf' || o.method === 'minres' ? '最小残差法と主因子法は理論上同じ解に収束します（収束判定の違いで末尾の桁が少し違うことがあります）。' : null,
+      ]);
+      out.push(table(`因子負荷量（${m} 因子）`, lcols, lrows, notesL));
+
+      if (o.chars) {
+        const ssRows = fnames.map((nm, k) => ({ f: nm, ss: fin.ss[k], prop: fin.ss[k] / p, cum: S.sum(fin.ss.slice(0, k + 1)) / p }));
+        out.push(table('因子の特性', [{ key: 'f', label: '', fmt: 'text' }, { key: 'ss', label: `SS 負荷量（${oblique ? '斜交' : rotName === 'none' ? '回転前' : '回転後'}）` }, { key: 'prop', label: '寄与率' }, { key: 'cum', label: '累積寄与率' }], ssRows,
+          [oblique ? '斜交回転では因子が相関するため、SS 負荷量は diag(Φ L′L) で求めています。累積寄与率は参考値です。' : '寄与率は SS 負荷量 ÷ 項目数です。']));
+      }
+      if (oblique && o.phi) out.push(table('因子間相関', [{ key: 'f', label: '', fmt: 'text' }, ...fnames.map((nm, k) => ({ key: `c${k}`, label: nm }))],
+        fnames.map((nm, i) => { const r = { f: nm }; fnames.forEach((_, j) => { r[`c${j}`] = j <= i ? Phi[i][j] : null; }); return r; })));
+      if (oblique && o.struct) {
+        const St = S.matmul(P_, Phi);
+        out.push(table('構造行列', [{ key: 'item', label: '項目', fmt: 'text' }, ...fnames.map((nm, k) => ({ key: `f${k}`, label: nm }))],
+          order.map(i => { const r = { item: cs[i].name }; St[i].forEach((v, k) => { r[`f${k}`] = v; }); return r; }),
+          ['項目と因子の相関（パターン行列 × 因子間相関）です。']));
+      }
+
+      // 適合度（最尤法）
+      if (o.fit) {
+        if (o.method === 'ml' && ext.F !== undefined && isFinite(ext.F)) {
+          const chi = (n - 1 - (2 * p + 5) / 6 - 2 * m / 3) * ext.F, df = dfEFA;
+          const chi0 = -(n - 1 - (2 * p + 5) / 6) * sp.logdet, df0 = p * (p - 1) / 2;
+          const row = { chi, df, p: df > 0 ? S.pchisqUpper(chi, df) : null, bic: chi - df * Math.log(n) };
+          if (df > 0) {
+            row.tli = (chi0 / df0 - chi / df) / (chi0 / df0 - 1);
+            row.rmsea = Math.sqrt(Math.max(chi - df, 0) / (df * (n - 1)));
+            const [lo, hi] = S.rmseaNcp(chi, df, 0.9); row.lo = Math.sqrt(lo / (df * (n - 1))); row.hi = Math.sqrt(hi / (df * (n - 1)));
+          }
+          out.push(table('モデルの適合度（最尤法）', [{ key: 'chi', label: 'χ²' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'p', label: 'p', fmt: 'p' },
+            { key: 'rmsea', label: 'RMSEA' }, { key: 'lo', label: '下限', group: 'RMSEA の 90% 信頼区間' }, { key: 'hi', label: '上限', group: 'RMSEA の 90% 信頼区間' },
+            { key: 'tli', label: 'TLI' }, { key: 'bic', label: 'BIC' }], [row],
+          ['χ² は Bartlett の補正つき（(N − 1 − (2p + 5)/6 − 2m/3) × 最小化した不一致関数）で、「因子数 m で十分」という帰無仮説の検定です。p が小さいと、その因子数では足りないことを示します。',
+            'RMSEA = √(max(χ² − df, 0) / (df × (N − 1)))、BIC = χ² − df × ln N です。標本が大きいと χ² はわずかなずれでも有意になるので、RMSEA（目安は .08 以下）や TLI（.95 以上）も合わせて見てください。']));
+        }
+      }
+      if (o.resid) {
+        const Rhat = PPt.map((r, i) => r.map((v, j) => (i === j ? 1 : v)));
+        let rms = 0, cnt = 0;
+        const rrows = cs.map((c, i) => { const r = { item: c.name }; cs.forEach((_, j) => { r[`c${j}`] = j < i ? R[i][j] - Rhat[i][j] : null; if (j < i) { rms += (R[i][j] - Rhat[i][j]) ** 2; cnt++; } }); return r; });
+        out.push(table('残差相関（観測の相関 − モデルから再現した相関）', [{ key: 'item', label: '', fmt: 'text' }, ...cs.map((c, j) => ({ key: `c${j}`, label: c.name }))], rrows,
+          [`残差の二乗平均平方根（RMSR）= ${Math.sqrt(rms / cnt).toFixed(3)}。残差の絶対値が .10 を超える組があれば、因子が足りないか項目に問題があるかもしれません。`]));
+      }
+
+      // 固有値・平行分析
+      const paShown = !!pa;
+      if (o.eigen) {
+        const rows = eig.map((v, k) => ({ k: k + 1, v, prop: v / p, cum: S.sum(eig.slice(0, k + 1)) / p, ...(paShown ? { o2: obs[k], pm: pa.mean[k], p95: pa.p95[k] } : {}),
+          use: (o.nfMethod === 'kaiser' ? v > 1 : k < m) ? '◯' : '' }));
+        const cols = [{ key: 'k', label: '成分', fmt: 'int' }, { key: 'v', label: '固有値' }, { key: 'prop', label: '寄与率' }, { key: 'cum', label: '累積寄与率' }];
+        if (paShown) cols.push({ key: 'o2', label: paType === 'fa' ? '観測（共通性入り）' : '観測', group: '平行分析' }, { key: 'pm', label: '乱数の平均', group: '平行分析' }, { key: 'p95', label: '乱数の 95%', group: '平行分析' });
+        cols.push({ key: 'use', label: '採用', fmt: 'text' });
+        out.push(table('固有値', cols, rows, clean([paShown ? '平行分析は、同じ人数・項目数の正規乱数データ 500 組から固有値の平均を求め、観測の固有値がそれを上回る成分までを採用します（乱数の種は固定）。' : null])));
+      }
+      if (o.scree) {
+        out.push(plot('スクリープロット', P.scree(paType === 'fa' && paShown ? obs : eig, paShown ? pa.mean : null, m, paType === 'fa' && paShown ? '固有値（共通性入り）' : '固有値')));
+      }
+      if (o.kmo) {
+        const km = S.kmo(R), bt = S.bartlett(R, n);
+        out.push(table('KMO（標本妥当性）', [{ key: 'item', label: '', fmt: 'text' }, { key: 'v', label: 'MSA' }, { key: 'ev', label: '目安', fmt: 'text' }],
+          [{ item: '全体', v: km.overall, ev: kmoLabel(km.overall) }, ...cs.map((c, i) => ({ item: c.name, v: km.items[i], ev: kmoLabel(km.items[i]) }))],
+          ['MSA は偏相関が小さいほど 1 に近づきます。目安は .6 以上（.8 以上なら良い）。項目ごとの値が .5 未満の項目は、外すことを検討します。']));
+        out.push(table('Bartlett の球面性検定', [{ key: 'chi', label: 'χ²' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'p', label: 'p', fmt: 'p' }], [bt],
+          ['帰無仮説は「相関行列が単位行列（項目どうしが無相関）」です。p が小さければ、因子分析をする意味がある程度の相関があります。']));
+      }
+      return out;
+    },
+  });
+
+  // ------------------------------------------------------------ 確認的因子分析（CFA）
+  const CFA_SLOTS = [1, 2, 3, 4, 5, 6];
+  A.push({
+    id: 'cfa', group: '尺度', title: '確認的因子分析（CFA）',
+    slots: CFA_SLOTS.map(k => ({ key: `f${k}`, label: `因子${k}の項目`, multi: true, types: ['scale', 'ordinal'], optional: k > 2 })),
+    options: [
+      { type: 'heading', label: 'モデル' },
+      { type: 'radio', key: 'scaling', options: [['marker', '尺度の固定: マーカー変数法（各因子の最初の項目の負荷量を 1）'], ['std', '尺度の固定: 因子の分散を 1'] ], def: 'marker' },
+      { type: 'check', key: 'orth', label: '因子どうしを無相関にする', def: false },
+      { type: 'heading', label: '因子の名前' },
+      ...CFA_SLOTS.map(k => ({ type: 'text', key: `fname${k}`, label: `因子${k}の名前`, def: `因子${k}` })),
+      { type: 'heading', label: '結果の表示' },
+      { type: 'check', key: 'fit', label: '適合度指標', def: true },
+      { type: 'check', key: 'stdSol', label: '標準化した推定値', def: true },
+      { type: 'check', key: 'stdSE', label: '標準化した推定値の標準誤差・信頼区間（デルタ法）', def: false },
+      { type: 'check', key: 'reliab', label: '因子ごとの信頼性（ω・AVE）', def: false },
+      { type: 'check', key: 'resid', label: '残差相関', def: false },
+      { type: 'check', key: 'path', label: 'パス図（標準化した解）', def: false },
+      { type: 'number', key: 'ciLevel', label: '信頼水準 %', def: 95, min: 50, max: 99.9, step: 0.1 },
+    ],
+    run(ds, sel, o) {
+      const defs = [];
+      for (const k of CFA_SLOTS) {
+        const its = sel[`f${k}`] || [];
+        if (its.length) defs.push({ name: String(o[`fname${k}`] || '').trim() || `因子${k}`, items: its });
+      }
+      if (!defs.length) return [];
+      const seen = new Set();
+      defs.forEach(d => { let nm = d.name, c = 2; while (seen.has(nm)) nm = `${d.name}_${c++}`; d.name = nm; seen.add(nm); });
+      const short = defs.find(d => d.items.length < 2);
+      if (short) return [err(`「${short.name}」の項目が 1 つだけです。各因子に 2 つ以上（できれば 3 つ以上）の項目が必要です。`)];
+      const names = [...new Set(defs.flatMap(d => d.items))];
+      const p = names.length, nf = defs.length;
+      if (p < 3) return [err('項目が 3 つ未満です。')];
+      const cs = names.map(nm => col(ds, nm)), idx = D.complete(ds, cs), n = idx.length;
+      if (n <= p) return [err(`有効な行（${n} 行）が項目数（${p}）以下です。`)];
+      const X = cs.map(c => vals(c, idx));
+      if (X.some(v => S.variance(v) < 1e-12)) return [err('値がすべて同じ項目があります。')];
+      const free = names.map(nm => defs.map(d => d.items.includes(nm)));
+      const first = defs.map(d => names.indexOf(d.items[0]));
+      const Sm = S.covMat(X, 0);
+      const r = S.cfa(Sm, n, { p, nf, free, first, orth: !!o.orth }, o.scaling === 'std' ? 'std' : 'marker');
+      if (r.error) return [err(r.error)];
+      const out = [], lv = level(o), zq = S.qnorm(1 - (1 - lv) / 2);
+      const zp = (est, se) => (se === null || se === undefined || !isFinite(se) || se <= 0 ? { z: null, p: null, lo: null, hi: null }
+        : { z: est / se, p: 2 * S.pnorm(-Math.abs(est / se)), lo: est - zq * se, hi: est + zq * se });
+
+      const warn = clean([
+        !r.converged ? '最適化が収束しませんでした。結果は信頼できません。モデルや項目を見直してください。' : null,
+        !r.identified ? 'モデルが識別されていない可能性があります（情報行列が特異）。標準誤差は計算できません。因子あたりの項目を増やすか、モデルを簡単にしてください。' : null,
+        r.heywood ? '負の分散、または標準化した負荷量の絶対値が 1 を超える推定値があります（Heywood ケース）。モデルが合っていない可能性があります。' : null,
+        r.unstable ? 'マーカー変数の負荷量がほぼ 0 です。尺度を「因子の分散を 1」にしてください。' : null,
+      ]);
+      const baseNote = `最尤法（共分散行列を N で割る lavaan の既定と同じ）。N = ${n}。${excluded(ds, idx) || ''}標準誤差は期待情報行列から求めています。`;
+      out.push(table('モデルの検定（χ²）', [{ key: 'm', label: '', fmt: 'text' }, { key: 'chi', label: 'χ²' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'p', label: 'p', fmt: 'p' }],
+        [{ m: 'ベースラインモデル（項目どうしが無相関）', chi: r.chisqB, df: r.dfB, p: r.pvalB }, { m: '因子モデル', chi: r.chisq, df: r.df, p: r.df > 0 ? r.pval : null }],
+        clean([baseNote, ...warn, '因子モデルの p が小さいと、モデルから再現した共分散が観測と合っていないことを示します。標本が大きいとわずかなずれでも有意になります。', r.df === 0 ? '自由度が 0（ちょうど識別）なので、モデルは必ずデータに完全に合い、適合度は評価できません。' : null])));
+      if (o.fit) out.push(table('適合度指標', [{ key: 'cfi', label: 'CFI' }, { key: 'tli', label: 'TLI' }, { key: 'rmsea', label: 'RMSEA' },
+        { key: 'lo', label: '下限', group: 'RMSEA の 90% 信頼区間' }, { key: 'hi', label: '上限', group: 'RMSEA の 90% 信頼区間' }, { key: 'srmr', label: 'SRMR' }],
+        [{ cfi: r.cfi, tli: r.tli, rmsea: r.rmsea, lo: r.rmseaLo, hi: r.rmseaHi, srmr: r.srmr }],
+        ['目安: CFI・TLI は .95 以上、RMSEA は .06 以下（.08 以下なら許容）、SRMR は .08 以下（Hu & Bentler, 1999）。これらは目安であり、機械的な合否の基準ではありません。']));
+
+      // 因子負荷量
+      const lrows = [];
+      defs.forEach((d, k) => names.forEach((nm, i) => {
+        if (!free[i][k]) return;
+        const est = r.Lam[i][k], se = r.seLam[i][k], fixed = r.lamFixed[i][k];
+        lrows.push({ f: lrows.some(x => x._k === k) ? '' : d.name, item: nm, est, se: fixed ? null : se, ...(fixed ? { z: null, p: null, lo: null, hi: null } : zp(est, se)), std: r.stdLam[i][k], _k: k, _sep: !lrows.some(x => x._k === k) && lrows.length > 0 });
+      }));
+      const lcols = [{ key: 'f', label: '因子', fmt: 'text' }, { key: 'item', label: '項目', fmt: 'text' }, { key: 'est', label: '推定値' }, { key: 'se', label: '標準誤差' }, { key: 'z', label: 'z' }, { key: 'p', label: 'p', fmt: 'p' },
+        { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) }];
+      if (o.stdSol) lcols.push({ key: 'std', label: '標準化' });
+      out.push(table('因子負荷量', lcols, lrows, clean([o.scaling === 'std' ? '因子の分散を 1 に固定しているので、負荷量は「因子が 1 SD 変わったときの項目の変化」です。' : '各因子の最初の項目の負荷量を 1 に固定しています（標準誤差などは空欄）。',
+        free.some(r_ => r_.filter(Boolean).length > 1) ? '複数の因子に入れた項目は、それぞれの因子への負荷量（交差負荷）を自由に推定しています。' : null,
+        o.stdSol ? '標準化は、因子と項目の分散を 1 にそろえた値です（lavaan の std.all）。' : null])));
+
+      // 因子の分散・共分散
+      const crows = [];
+      for (let k = 0; k < nf; k++) for (let l = k; l < nf; l++) {
+        const isVar = k === l;
+        if (isVar && o.scaling === 'std') continue;
+        if (!isVar && o.orth) continue;
+        const est = r.Phi[k][l], se = r.sePhi[k][l];
+        crows.push({ a: defs[k].name, b: isVar ? '（分散）' : defs[l].name, est, se, ...zp(est, se), std: isVar ? 1 : r.stdPhi[k][l] });
+      }
+      if (crows.length) out.push(table('因子の分散・共分散', [{ key: 'a', label: '', fmt: 'text' }, { key: 'b', label: '', fmt: 'text' }, { key: 'est', label: '推定値' }, { key: 'se', label: '標準誤差' }, { key: 'z', label: 'z' }, { key: 'p', label: 'p', fmt: 'p' },
+        { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) }, ...(o.stdSol ? [{ key: 'std', label: '標準化（相関）' }] : [])], crows));
+
+      // 独自分散
+      const prows = names.map((nm, i) => ({ item: nm, est: r.Psi[i], se: r.sePsi[i], ...zp(r.Psi[i], r.sePsi[i]), std: r.stdPsi[i] }));
+      out.push(table('項目の独自分散（誤差分散）', [{ key: 'item', label: '項目', fmt: 'text' }, { key: 'est', label: '推定値' }, { key: 'se', label: '標準誤差' }, { key: 'z', label: 'z' }, { key: 'p', label: 'p', fmt: 'p' },
+        { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) }, ...(o.stdSol ? [{ key: 'std', label: '標準化（1 − R²）' }] : [])], prows,
+      [o.stdSol ? '標準化した独自分散は、その項目の分散のうち因子で説明されない割合です。' : '']));
+
+      if (o.stdSE) {
+        const stdNote = '標準化した値の標準誤差は、元の推定値の共分散行列からデルタ法で求めています（数値微分）。標準化した値は 1 を超えないので、信頼区間が −1〜1 をはみ出すことがあります。';
+        const sl = [];
+        defs.forEach((d, k) => names.forEach((nm, i) => {
+          if (!free[i][k]) return;
+          const est = r.stdLam[i][k], se = r.seStdLam[i][k];
+          sl.push({ f: sl.some(x => x._k === k) ? '' : d.name, item: nm, est, se, ...zp(est, se), _k: k, _sep: !sl.some(x => x._k === k) && sl.length > 0 });
+        }));
+        const scols = h_ => [...h_, { key: 'est', label: '標準化' }, { key: 'se', label: '標準誤差' }, { key: 'z', label: 'z' }, { key: 'p', label: 'p', fmt: 'p' },
+          { key: 'lo', label: '下限', group: ciLabel(o) }, { key: 'hi', label: '上限', group: ciLabel(o) }];
+        out.push(table('標準化した因子負荷量', scols([{ key: 'f', label: '因子', fmt: 'text' }, { key: 'item', label: '項目', fmt: 'text' }]), sl, [stdNote]));
+        if (nf > 1 && !o.orth) {
+          const sc = [];
+          for (let k = 0; k < nf; k++) for (let l = k + 1; l < nf; l++) sc.push({ a: defs[k].name, b: defs[l].name, est: r.stdPhi[k][l], se: r.seStdPhi[k][l], ...zp(r.stdPhi[k][l], r.seStdPhi[k][l]) });
+          out.push(table('標準化した因子間相関', scols([{ key: 'a', label: '', fmt: 'text' }, { key: 'b', label: '', fmt: 'text' }]), sc));
+        }
+        out.push(table('標準化した独自分散', scols([{ key: 'item', label: '項目', fmt: 'text' }]), names.map((nm, i) => ({ item: nm, est: r.stdPsi[i], se: r.seStdPsi[i], ...zp(r.stdPsi[i], r.seStdPsi[i]) }))));
+      }
+      if (o.reliab) {
+        const rel = defs.map((d, k) => {
+          const ls = d.items.map(nm => r.stdLam[names.indexOf(nm)][k]), th = d.items.map(nm => r.stdPsi[names.indexOf(nm)]);
+          const sl = S.sum(ls);
+          return { f: d.name, k: d.items.length, w: sl * sl / (sl * sl + S.sum(th)), ave: S.sum(ls.map(v => v * v)) / ls.length };
+        });
+        out.push(table('因子ごとの信頼性', [{ key: 'f', label: '因子', fmt: 'text' }, { key: 'k', label: '項目数', fmt: 'int' }, { key: 'w', label: '合成信頼性 ω' }, { key: 'ave', label: 'AVE' }], rel,
+          ['ω = (Σλ)² ÷ ((Σλ)² + Σθ)、AVE = 標準化した負荷量の二乗の平均（いずれも標準化した解から）。目安は ω が .70 以上、AVE が .50 以上。']));
+      }
+      if (o.resid) {
+        let rms = 0, cnt = 0;
+        const rrows = names.map((nm, i) => { const row = { item: nm }; names.forEach((_, j) => { row[`c${j}`] = j < i ? r.resid[i][j] : null; if (j < i) { rms += r.resid[i][j] ** 2; cnt++; } }); return row; });
+        out.push(table('残差相関（観測の相関 − モデルから再現した相関）', [{ key: 'item', label: '', fmt: 'text' }, ...names.map((nm, j) => ({ key: `c${j}`, label: nm }))], rrows,
+          [`残差の二乗平均平方根 = ${Math.sqrt(rms / cnt).toFixed(3)}。絶対値が .10 を超える組は、モデルがうまく表せていない部分です。`]));
+      }
+      if (o.path) {
+        out.push(plot('パス図（標準化した解）', P.pathDiagram({
+          factors: defs.map(d => d.name),
+          items: names.map((nm, i) => ({ name: nm, loads: r.stdLam[i].map(v => (v === null ? null : v)), psi: r.stdPsi[i], primary: free[i].indexOf(true) })),
+          phi: r.stdPhi,
+        })), note('パス図: 楕円が因子、四角が項目。矢印の数字は標準化した負荷量（破線は交差負荷）、箱の右の数字は標準化した独自分散、左の弧の数字は因子間相関です。'));
+      }
+      return out;
+    },
+  });
+
   root.Analyses = A;
 })(typeof window !== 'undefined' ? window : globalThis);
