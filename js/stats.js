@@ -835,6 +835,25 @@
     if (kn) L = L.map((r, i) => r.map(v => v * kn.w[i]));
     return { loadings: L, T };
   };
+  // R の stats::varimax と同じアルゴリズム（Kaiser の正規化つき。打ち切りも同じで、基準の増え方が eps = 1e-5 未満になるまで）。
+  // psych::fa(rotate = "varimax") が使うので、R・JASP と同じ値になる（勾配射影法より収束が浅く、負荷量が 1e-3 ほど違う）
+  S.varimaxR = function (A, normalize, eps) {
+    normalize = normalize !== false; eps = eps || 1e-5;
+    const nc = A[0].length, p = A.length;
+    if (nc < 2) return { loadings: A, T: idn(nc) };
+    const kn = normalize ? kaiserNorm(A) : null, x = kn ? kn.An : A;
+    let T = idn(nc), d = 0;
+    for (let it = 0; it < 1000; it++) {
+      const z = mmul(x, T), col2 = Array.from({ length: nc }, (_, j) => S.sum(z.map(r => r[j] * r[j])));
+      const B = mmul(tpose(x), z.map(r => r.map((v, j) => v * v * v - v * col2[j] / p)));
+      const e = S.eigSym(mmul(tpose(B), B));
+      T = polar(B);                                                         // 特異値分解 B = U D V′ の U V′
+      const dpast = d; d = S.sum(e.values.map(v => Math.sqrt(Math.max(v, 0))));   // 特異値の和
+      if (d < dpast * (1 + eps)) break;
+    }
+    let L = mmul(x, T); if (kn) L = L.map((r, i) => r.map(v => v * kn.w[i]));
+    return { loadings: L, T };
+  };
   // 斜交回転（オブリミン; gam = 0 はクォーティミン）。L = A (T')⁻¹, 因子相関 Φ = T'T
   S.rotateOblimin = function (A, gam) {
     const m = A[0].length;
@@ -860,23 +879,27 @@
     }
     return { loadings: L, phi: mmul(tpose(T), T), T };
   };
-  // プロマックス（R の stats::promax と同じ手順; m = 4）
+  // プロマックス（m = 4）。psych::fa(rotate = "promax") と同じ手順（JASP が使う）：
+  // 行を長さ 1 にそろえ（Kaiser の正規化）→ 正規化なしのバリマックス → 目標 |x|^(m−1)·x への最小二乗 → 列の正規化 → 行の長さを戻す。
+  // R 標準の stats::promax は最小二乗の段階を正規化の前の値で行うので、結果が少し違う
   S.promax = function (A, mpow) {
     const m = A[0].length; mpow = mpow || 4;
     if (m < 2) return { loadings: A, phi: [[1]] };
-    const vm = S.rotateOrth(A, 'varimax', true), X = vm.loadings;
+    const kn = kaiserNorm(A);
+    const vm = S.rotateOrth(kn.An, 'varimax', false), X = vm.loadings;
     const Q = X.map(r => r.map(v => v * Math.pow(Math.abs(v), mpow - 1)));
     let U = mmul(S.inverse(mmul(tpose(X), X)), mmul(tpose(X), Q));
     const d = diagOf(S.inverse(mmul(tpose(U), U)));
     U = U.map(r => r.map((v, j) => v * Math.sqrt(d[j])));
     const rot = mmul(vm.T, U), ui = S.inverse(rot), C = mmul(ui, tpose(ui));
-    return { loadings: mmul(X, U), phi: S.cov2cor(C) };
+    return { loadings: mmul(X, U).map((r, i) => r.map(v => v * kn.w[i])), phi: S.cov2cor(C) };
   };
   // 回転の入口。name: 'none' | 'varimax' | 'quartimax' | 'oblimin' | 'promax'
   S.efaRotate = function (L0, name) {
     const m = L0[0].length;
     if (m < 2 || name === 'none') return { loadings: L0, phi: null };
-    if (name === 'varimax' || name === 'quartimax') return { loadings: S.rotateOrth(L0, name, name === 'varimax').loadings, phi: null };
+    if (name === 'varimax') return { loadings: S.varimaxR(L0, true).loadings, phi: null };
+    if (name === 'quartimax') return { loadings: S.rotateOrth(L0, 'quartimax', false).loadings, phi: null };
     if (name === 'oblimin') { const r = S.rotateOblimin(L0, 0); return { loadings: r.loadings, phi: r.phi }; }
     return S.promax(L0, 4);
   };
@@ -886,6 +909,7 @@
     const sign = Array.from({ length: m }, (_, k) => (S.sum(L.map(r => r[k])) < 0 ? -1 : 1));
     let Ls = L.map(r => r.map((v, k) => v * sign[k])), Ph = phi ? phi.map((r, i) => r.map((v, j) => v * sign[i] * sign[j])) : null;
     const ssOf = (LL, PP) => (PP ? diagOf(mmul(PP, mmul(tpose(LL), LL))) : Array.from({ length: m }, (_, k) => S.sum(LL.map(r => r[k] * r[k]))));
+    // 並べ替えの基準は SS 負荷量（直交は列の平方和、斜交は因子間相関で重みづけた diag(Φ L′L)）。psych::fa も同じ
     let ss = ssOf(Ls, Ph);
     const ord = ss.map((_, k) => k).sort((a, b) => ss[b] - ss[a]);
     Ls = Ls.map(r => ord.map(k => r[k]));

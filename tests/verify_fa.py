@@ -79,9 +79,15 @@ def ref_minres(R, m, seed=5):
 def kaiser(A):
     h = np.sqrt((A ** 2).sum(1)); return A / h[:, None], h
 
-def rot_varimax(A):
-    An, h = kaiser(A); L, T = rotate_factors(An, "varimax", tol=1e-9, max_tries=3000)
-    return L * h[:, None], T
+def rot_varimax(A, eps=1e-5):                         # R の stats::varimax を numpy で書き直したもの（Kaiser の正規化つき、eps = 1e-5 で打ち切る。psych::fa も同じ）
+    An, h = kaiser(A); pp, nc = An.shape; T = np.eye(nc); d = 0.0
+    for _ in range(1000):
+        z = An @ T
+        B = An.T @ (z ** 3 - z @ np.diag((z ** 2).sum(0)) / pp)
+        u, s, vt = np.linalg.svd(B); T = u @ vt
+        dpast = d; d = s.sum()
+        if d < dpast * (1 + eps): break
+    return (An @ T) * h[:, None], T
 
 def rot_quartimax(A):
     L, T = rotate_factors(A, "quartimax", tol=1e-9, max_tries=3000); return L, T
@@ -90,19 +96,20 @@ def rot_oblimin(A):
     L, T = rotate_factors(A, "oblimin", 0, "oblique", tol=1e-9, max_tries=3000)
     return L, T.T @ T
 
-def rot_promax(A, mp=4):                              # R の stats::promax と同じ手順
-    V, T = rot_varimax(A)
+def rot_promax(A, mp=4):                              # psych::fa(rotate="promax") と同じ手順: Kaiser の正規化 → 正規化なしのバリマックス → 目標への最小二乗 → 行の長さを戻す
+    An, h = kaiser(A)
+    V, T = rotate_factors(An, "varimax", tol=1e-9, max_tries=3000)
     Q = V * np.abs(V) ** (mp - 1)
     U = np.linalg.solve(V.T @ V, V.T @ Q)
     d = np.diag(np.linalg.inv(U.T @ U)); U = U @ np.diag(np.sqrt(d))
     rot = T @ U; ui = np.linalg.inv(rot); C = ui @ ui.T
-    return V @ U, C / np.sqrt(np.outer(np.diag(C), np.diag(C)))
+    return (V @ U) * h[:, None], C / np.sqrt(np.outer(np.diag(C), np.diag(C)))
 
 def finalize(L, Phi=None):
     sign = np.where(L.sum(0) < 0, -1.0, 1.0); L = L * sign
     if Phi is not None: Phi = Phi * np.outer(sign, sign)
     ss = np.diag(Phi @ L.T @ L) if Phi is not None else (L ** 2).sum(0)
-    o = np.argsort(-ss, kind="stable"); L = L[:, o]
+    o = np.argsort(-ss, kind="stable"); L = L[:, o]      # SS 負荷量（斜交は diag(Φ L′L)）の大きい順。psych::fa も同じ
     if Phi is not None: Phi = Phi[np.ix_(o, o)]
     ss = np.diag(Phi @ L.T @ L) if Phi is not None else (L ** 2).sum(0)
     return L, Phi, ss
@@ -229,8 +236,10 @@ for key, m_ in (("ml-oblimin", 3), ("fa2", 2)):
     tab = J["fa"]["ml-oblimin"]["モデルの適合度（最尤法）"][0] if key == "ml-oblimin" else J["fa2"]["モデルの適合度（最尤法）"][0]
     chk(f"EFA(m={m_}) χ²", tab["chi"], chi_m, 2e-6); chk(f"EFA(m={m_}) df", tab["df"], df_m, 0)
     chk(f"EFA(m={m_}) p", tab["p"], stats.chi2.sf(chi_m, df_m), 1e-5)
-    chk(f"EFA(m={m_}) TLI", tab["tli"], (chi0 / df0 - chi_m / df_m) / (chi0 / df0 - 1), 2e-6)
-    chk(f"EFA(m={m_}) RMSEA", tab["rmsea"], math.sqrt(max(chi_m - df_m, 0) / (df_m * (n - 1))), 2e-6)
+    # TLI と RMSEA は psych::fa（fa.stats）の定義: TLI = (F0/df0 − F/df)/(F0/df0 − 1/nm), RMSEA = √max(χ²/(df·N) − 1/(N−1), 0)
+    nm_ = n - 1 - (2 * p + 5) / 6 - 2 * m_ / 3; F0_ = -np.log(np.linalg.det(R))
+    chk(f"EFA(m={m_}) TLI", tab["tli"], (F0_ / df0 - Fm / df_m) / (F0_ / df0 - 1 / nm_), 2e-6)
+    chk(f"EFA(m={m_}) RMSEA", tab["rmsea"], math.sqrt(max(chi_m / (df_m * n) - 1 / (n - 1), 0)), 2e-6)
     lo, hi = ncp_ci(chi_m, df_m)
     chk(f"EFA(m={m_}) RMSEA 下限", tab["lo"], math.sqrt(lo / (df_m * (n - 1))), 1e-5); chk(f"EFA(m={m_}) RMSEA 上限", tab["hi"], math.sqrt(hi / (df_m * (n - 1))), 1e-5)
     chk(f"EFA(m={m_}) BIC", tab["bic"], chi_m - df_m * math.log(n), 2e-6)

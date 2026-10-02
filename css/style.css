@@ -179,6 +179,8 @@ dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--p
 dialog::backdrop { background: rgba(0,0,0,.4); }
 dialog h2 { margin: 0 0 8px; font-size: 17px; }
 dialog textarea { width: 100%; font: 12.5px/1.4 ui-monospace, Consolas, monospace; background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+dialog.wide { width: min(960px, calc(100vw - 32px)); }
+dialog.wide textarea { white-space: pre; overflow: auto; tab-size: 2; }
 .dlgbtns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
 /* スマートフォン：上下に積む */

@@ -108,6 +108,7 @@
       const sec = h('section', { class: 'analysis' + (it.uid === state.active ? ' active' : ''), 'data-uid': it.uid },
         h('header', {},
           h('button', { class: 'atitle', title: '設定を開く', onclick: () => openItem(it.uid) }, it.def.title),
+          h('button', { class: 'icon rbtn', title: 'この分析を R で再現するコード（データ込み）', onclick: () => showRCode([it]) }, 'R'),
           h('button', { class: 'icon', title: '複製', onclick: () => duplicateItem(it.uid) }, '⧉'),
           h('button', { class: 'icon', title: 'この分析を削除', onclick: () => removeItem(it.uid) }, '✕')),
         h('div', { class: 'aout', html: computeItem(it) }));
@@ -168,6 +169,23 @@
   function toast(msg) {
     const t = $('#toast'); t.textContent = msg; t.classList.add('show');
     clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  // ------------------------------------------------------------ R コード
+  function showRCode(items) {
+    if (!state.ds) { toast('データがありません。'); return; }
+    if (!items.length) { toast('分析がありません。'); return; }
+    if (!window.RCode) { toast('R コードの部品を読み込めていません。'); return; }
+    const ok = items.filter(i => window.RCode.supported(i.def.id));
+    if (!ok.length) { toast('この分析の R コードには対応していません。'); return; }
+    let code;
+    try { code = window.RCode.build(state.ds, ok, { D }); } catch (e) { console.error(e); toast('R コードを作れませんでした: ' + e.message); return; }
+    $('#rTitle').textContent = ok.length === 1 ? `R コード — ${ok[0].def.title}` : `R コード — ${ok.length} つの分析`;
+    const kb = (new Blob([code]).size / 1024).toFixed(1);
+    $('#rInfo').textContent = `${code.split('\n').length} 行・${kb} KB。分析に使うデータを含みます。${ok.length < items.length ? `（対応していない分析 ${items.length - ok.length} 件は含みません）` : ''}`;
+    $('#rText').value = code;
+    $('#rDlg').showModal();
+    $('#rText').scrollTop = 0;
   }
 
   // ------------------------------------------------------------ 分析の追加・編集
@@ -465,6 +483,18 @@
     $('#btnData').addEventListener('click', () => { state.active = null; renderLeft(); markActive(); });
     $('#btnExport').addEventListener('click', exportResults);
     $('#btnPrint').addEventListener('click', () => window.print());
+    $('#btnRAll').addEventListener('click', () => showRCode(state.items));
+    $('#rClose').addEventListener('click', () => $('#rDlg').close());
+    $('#rCopy').addEventListener('click', async () => {
+      const ta = $('#rText');
+      try { await navigator.clipboard.writeText(ta.value); }
+      catch (err) { ta.focus(); ta.select(); if (!document.execCommand('copy')) { toast('コピーできませんでした。Ctrl+A、Ctrl+C でお試しください。'); return; } }
+      toast('R コードをコピーしました。');
+    });
+    $('#rSave').addEventListener('click', () => {
+      const t = $('#rTitle').textContent.replace(/^R コード — /, '').replace(/[\\/:*?"<>|]/g, '_');
+      download(`${t}.R`, '﻿' + $('#rText').value, 'text/plain;charset=utf-8');
+    });
     $('#btnSaveCsv').addEventListener('click', () => { if (state.ds) download(`${state.ds.name}.csv`, '﻿' + D.toCSV(state.ds), 'text/csv'); else toast('データがありません。'); });
     $('#pasteOk').addEventListener('click', e => {
       e.preventDefault();

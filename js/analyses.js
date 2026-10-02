@@ -1592,19 +1592,20 @@
       // 適合度（最尤法）
       if (o.fit) {
         if (o.method === 'ml' && ext.F !== undefined && isFinite(ext.F)) {
-          const chi = (n - 1 - (2 * p + 5) / 6 - 2 * m / 3) * ext.F, df = dfEFA;
-          const chi0 = -(n - 1 - (2 * p + 5) / 6) * sp.logdet, df0 = p * (p - 1) / 2;
+          // 適合度指標は psych::fa（JASP の計算エンジン）と同じ定義にそろえる
+          const nm_ = n - 1 - (2 * p + 5) / 6 - 2 * m / 3, chi = nm_ * ext.F, df = dfEFA;
+          const F0 = -sp.logdet, df0 = p * (p - 1) / 2;                         // ヌルモデル（無相関）の不一致関数 = −ln|R|
           const row = { chi, df, p: df > 0 ? S.pchisqUpper(chi, df) : null, bic: chi - df * Math.log(n) };
           if (df > 0) {
-            row.tli = (chi0 / df0 - chi / df) / (chi0 / df0 - 1);
-            row.rmsea = Math.sqrt(Math.max(chi - df, 0) / (df * (n - 1)));
+            row.tli = (F0 / df0 - ext.F / df) / (F0 / df0 - 1 / nm_);
+            row.rmsea = Math.sqrt(Math.max(chi / (df * n) - 1 / (n - 1), 0));
             const [lo, hi] = S.rmseaNcp(chi, df, 0.9); row.lo = Math.sqrt(lo / (df * (n - 1))); row.hi = Math.sqrt(hi / (df * (n - 1)));
           }
           out.push(table('モデルの適合度（最尤法）', [{ key: 'chi', label: 'χ²' }, { key: 'df', label: '自由度', fmt: 'df' }, { key: 'p', label: 'p', fmt: 'p' },
             { key: 'rmsea', label: 'RMSEA' }, { key: 'lo', label: '下限', group: 'RMSEA の 90% 信頼区間' }, { key: 'hi', label: '上限', group: 'RMSEA の 90% 信頼区間' },
             { key: 'tli', label: 'TLI' }, { key: 'bic', label: 'BIC' }], [row],
           ['χ² は Bartlett の補正つき（(N − 1 − (2p + 5)/6 − 2m/3) × 最小化した不一致関数）で、「因子数 m で十分」という帰無仮説の検定です。p が小さいと、その因子数では足りないことを示します。',
-            'RMSEA = √(max(χ² − df, 0) / (df × (N − 1)))、BIC = χ² − df × ln N です。標本が大きいと χ² はわずかなずれでも有意になるので、RMSEA（目安は .08 以下）や TLI（.95 以上）も合わせて見てください。']));
+            'RMSEA = √max(χ² / (df × N) − 1 / (N − 1), 0)、TLI = (F₀/df₀ − F/df) / (F₀/df₀ − 1/nm)（F は最小化した不一致関数、F₀ = −ln|R|、nm は χ² の補正係数）、BIC = χ² − df × ln N で、どれも psych::fa と同じ定義です。標本が大きいと χ² はわずかなずれでも有意になるので、RMSEA（目安は .08 以下）や TLI（.95 以上）も合わせて見てください。']));
         }
       }
       if (o.resid) {

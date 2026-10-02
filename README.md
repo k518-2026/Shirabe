@@ -46,8 +46,8 @@ JASP のような「左でデータと変数を選ぶ → 右に APA 形式の�
 | 最小残差法 | 対角を除いた残差の平方和を最小にする（Harman）。主因子法を収束まで繰り返した解と理論上は同じです |
 | 最尤法（EFA） | EM アルゴリズム（Rubin & Thayer, 1982）。独自分散の下限は 0.005（R の factanal と同じ） |
 | 平行分析 | 同じ人数・項目数の正規乱数 500 組の固有値の平均を上回る成分までを採用（乱数の種は固定）。主成分（相関行列の固有値）か共通因子（対角に重相関の二乗を入れた固有値）を選べます |
-| 回転 | 勾配射影法（Bernaards & Jennrich, 2005）。バリマックスは Kaiser の正規化つき、プロマックスは R の `stats::promax`（m = 4）と同じ手順 |
-| EFA の χ² | Bartlett の補正つき (N − 1 − (2p + 5)/6 − 2m/3) × 最小化した不一致関数。RMSEA = √(max(χ² − df, 0) / (df × (N − 1))) |
+| 回転 | 勾配射影法（Bernaards & Jennrich, 2005）。バリマックスは R の `stats::varimax` と同じ手順（Kaiser の正規化つき）、プロマックスは psych の手順（m = 4） |
+| EFA の χ² | Bartlett の補正つき (N − 1 − (2p + 5)/6 − 2m/3) × 最小化した不一致関数。RMSEA・TLI は psych と同じ定義（RMSEA = √(max(χ²/(df × N) − 1/(N − 1), 0))） |
 | CFA の推定 | 最尤法。共分散行列は N で割る（lavaan の既定と同じ）。標準誤差は期待情報行列 |
 | CFA の適合度 | χ² = N × 最小化した不一致関数。CFI・TLI・RMSEA（信頼区間は非心カイ二乗分布）・SRMR は lavaan と同じ定義 |
 | 因子ごとの ω・AVE | 標準化した負荷量と独自分散から (Σλ)² ÷ ((Σλ)² + Σθ)、負荷量の二乗の平均 |
@@ -93,6 +93,16 @@ BF₁₀・BF₀₁・log(BF₁₀) を切り替えられ、事前分布の幅�
 2. データ表の見出しのアイコンをクリックすると、尺度（📏 連続・📶 順序・🏷 名義）を切り替えられます。
 3. 上のメニューから分析を選び、変数をダブルクリック・ドラッグ・「→」ボタンで欄に入れます。
 4. 右側に結果が出ます。「結果を保存」で HTML に、「印刷」で PDF にできます。
+5. 結果を R でも確かめたいときは、各分析の見出しの **R** ボタン（または上の「Rコード」で全分析まとめて）を押します。使った列のデータを埋め込んだ R のコードが出るので、「コピー」して R または JASP の R コンソールに貼り付けるだけで再現できます。
+
+### R コード
+
+- 設定（変数・検定の種類・信頼水準・事前分布など）をそのまま R の関数呼び出しにします。使う列のデータはコードの中に入っているので、ファイルを別に用意する必要はありません。
+- 使うパッケージ: `car`・`emmeans`（分散分析）、`BayesFactor`（ベイズファクター）、`psych`・`GPArotation`（信頼性・EFA）、`lavaan`（CFA・ω）。無い場合はコードの先頭が案内します（`install.packages("名前")`）。
+- 日本語の変数名を含むので、UTF-8 で動く R（R 4.2 以降の Windows など）で実行してください。
+- 結果は Shirabe の画面と見比べます。R の出力は桁数が多く、丸め方が少し違います。
+- ベイズファクターはモンテカルロ法を使う場合（分散分析など）、R でも実行ごとに小数 2〜3 桁目まで揺れることがあります。
+- Shirabe と同じ結果になるよう、R 4.5 以降で既定が変わった Wilcoxon・Mann-Whitney の `exact` は明示しています。
 
 - 文字コードは UTF-8 と Shift_JIS に対応しています。Excel ファイル（.xlsx）は直接は読めないので、CSV で保存するか表をコピーして貼り付けてください。
 - 欠損値は空欄・`NA`・`.` などで表します。分析ごとに、使う変数のどれかが欠けている行を除きます（相関はペアごと）。
@@ -113,16 +123,20 @@ node tests/verify_bayes.js bayes.json
 python tests/ref_omega.py omega.json
 node tests/verify_omega.js omega.json
 python tests/verify_fa.py analyses.json
+node tests/verify_rcode.js        # 実際の R で再検証（R が無ければ飛ばす。環境変数 SHIRABE_R_ROOT に R の置き場所を指定）
 ```
 
-ベイズファクターは R の BayesFactor パッケージ（JASP の計算エンジン）では確かめていません。
-代わりに、同じ事前分布とモデルのもとで、Shirabe とは別の方法で積分した値（SciPy）と照合しています。
+**R との照合**: `tests/verify_rcode.js` は、R コードの出力機能が作ったコードを実際の R（4.6.1。car・emmeans・BayesFactor・psych・GPArotation・lavaan）で実行し、Shirabe の画面の表と数値を突き合わせます（40 の設定・3099 の数値が一致）。t 検定・分散分析・反復測定・相関・回帰・分割表・二項検定・信頼性・EFA・CFA とそのベイズファクターを含みます。許容差は、通常 5e-6、ベイズファクター（積分・モンテカルロ法）は 2e-3〜（モンテカルロ法は R が報告する誤差の 4 倍）です。確認を通して、プロマックス・バリマックス・EFA の RMSEA・TLI は psych の定義に合わせました。
+
+以下は、R と別に行った SciPy・statsmodels などとの照合です。
+
+ベイズファクターは、同じ事前分布とモデルのもとで、Shirabe とは別の方法で積分した値（SciPy）とも照合しています。
 たとえば t 検定なら、Shirabe は δ と s の二重積分で、照合用は Rouder et al. (2009) の g による1次元積分です。
 
-因子分析も R（psych・lavaan）では確かめていません。代わりに、別の実装と突き合わせています（`tests/verify_fa.py`）。
+因子分析は、別の実装とも突き合わせています（`tests/verify_fa.py`）。
 
 - 抽出: 主因子法は statsmodels の `Factor`、最尤法と最小残差法は SciPy で独立に最適化した値（共通性が 1e-9 程度で一致）
-- 回転: statsmodels の勾配射影法（バリマックス・クォーティマックス・オブリミン）、プロマックスは R の手順を numpy で書き直したもの（負荷量の最大差 1e-7）
+- 回転: statsmodels の勾配射影法（バリマックス・クォーティマックス・オブリミン）、バリマックスは R の `stats::varimax`、プロマックスは psych の手順を numpy で書き直したもの（負荷量の最大差 1e-7）
 - 平行分析: 同じ乱数列で numpy が固有値を計算。KMO・Bartlett・適合度は numpy・SciPy の別の式
 - CFA: SciPy の BFGS で最尤推定し、標準誤差は duplication 行列を使った期待情報行列、標準化解の標準誤差は数値微分によるデルタ法、RMSEA の信頼区間は SciPy の非心カイ二乗分布
 
@@ -151,6 +165,7 @@ Shirabe は [JASP](https://jasp-stats.org/) を参考にした操作感を目指
 | `js/data.js` | CSV の読み込みと変数の尺度 |
 | `js/analyses.js` | 各分析の設定項目と計算・出力 |
 | `js/plots.js` | 図（SVG） |
+| `js/rcode.js` | 分析を R で再現するコード（データ込み）を作る |
 | `js/app.js` | 画面の動き |
 | `samples/` | サンプルデータ（`scripts/make_sample.js` で生成） |
 | `tests/` | SciPy・statsmodels との照合 |
